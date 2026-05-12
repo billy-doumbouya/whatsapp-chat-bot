@@ -1,0 +1,35 @@
+import "dotenv/config";
+import { Bio } from "../data/bio.js";
+
+const required = ["MONGO_URI", "GEMINI_API_KEY"];
+
+for (const key of required) {
+  if (!process.env[key]) {
+    console.error(`[ENV] Missing required env variable: ${key}`);
+    process.exit(1);
+  }
+}
+
+export const env = {
+  port: parseInt(process.env.PORT || "3000", 10),
+  nodeEnv: process.env.NODE_ENV || "development",
+  isDev: process.env.NODE_ENV !== "production",
+
+  mongoUri: process.env.MONGO_URI,
+
+  gemini: {
+    apiKey: process.env.GEMINI_API_KEY,
+    // gemini-1.5-flash est shut down — utilise 2.5
+    model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+  },
+
+  bot: {
+    name: process.env.BOT_NAME || "Billy Doumbouya",
+    // Persona chargé depuis src/data/persona.js — plus maintenable qu'une variable .env
+    persona: Bio,
+    replyGroups: process.env.REPLY_GROUPS === "true",
+    typingDelayMs: parseInt(process.env.TYPING_DELAY_MS || "1500", 10),
+    // Numéro WhatsApp de Billy au format JID (ex: 224623952011@s.whatsapp.net)
+    ownerJid: process.env.OWNER_JID || null,
+  },
+};

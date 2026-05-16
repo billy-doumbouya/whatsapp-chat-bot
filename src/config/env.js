@@ -13,16 +13,16 @@ for (const key of required) {
 export const env = {
   port: parseInt(process.env.PORT || "3000", 10),
   nodeEnv: process.env.NODE_ENV || "development",
-  app_url: process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`,
+  app_url:
+    process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`,
   app_name: process.env.APP_NAME || "WhatsApp Bot",
   isDev: process.env.NODE_ENV !== "production",
 
   mongoUri: process.env.MONGO_URI,
 
   gemini: {
-    apiKey: process.env.GEMINI_API_KEY,
-    // gemini-1.5-flash est shut down — utilise 2.5
-    model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+    apiKey: process.env.OPENROUTER_API_KEY,
+    model: process.env.AI_MODEL || "google/gemini-2.5-flash-preview:free",
   },
 
   bot: {

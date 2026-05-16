@@ -1,14 +1,13 @@
 import makeWASocket, {
-  useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
 } from "@whiskeysockets/baileys";
+import { useMongoAuthState } from "../helpers/mongo-auth.js";
 import { logger } from "../config/logger.js";
+import QRCode from "qrcode";
 
 let sock = null;
-
-// QR courant stocké en mémoire — lu par la route /api/qr
 let currentQR = null;
 let isConnected = false;
 
@@ -19,12 +18,9 @@ export function getConnectionStatus() {
   return isConnected;
 }
 
-/**
- * Starts the WhatsApp client
- * @param {Function} onMessage - called with (sock, jid, text, contactName, timestamp)
- */
 export async function startWhatsApp(onMessage) {
-  const { state, saveCreds } = await useMultiFileAuthState("auth");
+  // MongoDB auth — survit aux redémarrages Railway
+  const { state, saveCreds } = await useMongoAuthState();
   const { version } = await fetchLatestBaileysVersion();
 
   logger.info({ version }, "[WA] Baileys version");
@@ -69,7 +65,7 @@ export async function startWhatsApp(onMessage) {
         logger.info("[WA] Reconnecting in 3s...");
         setTimeout(() => startWhatsApp(onMessage), 3000);
       } else {
-        logger.error("[WA] Logged out. Delete /auth folder and restart.");
+        logger.error("[WA] Logged out. Delete auth from MongoDB and restart.");
         process.exit(1);
       }
     }

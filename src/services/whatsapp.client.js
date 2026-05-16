@@ -4,14 +4,24 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
 } from "@whiskeysockets/baileys";
-import qrcode from "qrcode-terminal";
 import { logger } from "../config/logger.js";
 
 let sock = null;
 
+// QR courant stocké en mémoire — lu par la route /api/qr
+let currentQR = null;
+let isConnected = false;
+
+export function getCurrentQR() {
+  return currentQR;
+}
+export function getConnectionStatus() {
+  return isConnected;
+}
+
 /**
  * Starts the WhatsApp client
- * @param {Function} onMessage - called with (sock, jid, text, contactName)
+ * @param {Function} onMessage - called with (sock, jid, text, contactName, timestamp)
  */
 export async function startWhatsApp(onMessage) {
   const { state, saveCreds } = await useMultiFileAuthState("auth");
@@ -26,29 +36,30 @@ export async function startWhatsApp(onMessage) {
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
     logger: logger.child({ module: "baileys" }),
-    // Reduce noise from Baileys internal logs
     browser: ["WhatsApp AI Bot", "Chrome", "1.0"],
     syncFullHistory: false,
     markOnlineOnConnect: false,
   });
 
-  // Save credentials whenever updated
   sock.ev.on("creds.update", saveCreds);
 
-  // Handle connection state changes
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
     if (qr) {
-      console.log(
-        "\n📱 Scanne ce QR avec WhatsApp → Appareils connectés → Connecter un appareil\n",
+      currentQR = qr;
+      isConnected = false;
+      logger.info(
+        "[WA] QR ready — ouvre /api/qr dans ton navigateur pour scanner",
       );
-      qrcode.generate(qr, { small: true });
     }
 
     if (connection === "open") {
+      currentQR = null;
+      isConnected = true;
       logger.info("[WA] Connected to WhatsApp ✓");
     }
 
     if (connection === "close") {
+      isConnected = false;
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
@@ -64,10 +75,8 @@ export async function startWhatsApp(onMessage) {
     }
   });
 
-  // Handle incoming messages
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
-
     for (const msg of messages) {
       await handleRawMessage(sock, msg, onMessage);
     }
@@ -76,26 +85,19 @@ export async function startWhatsApp(onMessage) {
   return sock;
 }
 
-/**
- * Extracts text + metadata from a raw Baileys message
- */
 async function handleRawMessage(sock, msg, onMessage) {
-  // Ignore our own messages
   if (!msg.message || msg.key.fromMe) return;
 
   const jid = msg.key.remoteJid;
 
-  // Extract text from different message types
   const text =
     msg.message?.conversation ||
     msg.message?.extendedTextMessage?.text ||
     msg.message?.imageMessage?.caption ||
     null;
 
-  // Ignore non-text messages (voice, stickers, etc.)
   if (!text || text.trim() === "") return;
 
-  // Extract contact name if available
   const contactName = msg.pushName || msg.verifiedBizName || null;
 
   logger.debug({ jid, contactName, text }, "[WA] Incoming message");
@@ -103,17 +105,10 @@ async function handleRawMessage(sock, msg, onMessage) {
   await onMessage(sock, jid, text.trim(), contactName, msg.messageTimestamp);
 }
 
-/**
- * Send a text message with optional typing indicator
- * @param {string} jid
- * @param {string} text
- * @param {number} delayMs
- */
 export async function sendMessage(jid, text, delayMs = 0) {
   if (!sock) throw new Error("WhatsApp client not initialized");
 
   if (delayMs > 0) {
-    // Simulate typing
     await sock.sendPresenceUpdate("composing", jid);
     await new Promise((r) => setTimeout(r, delayMs));
     await sock.sendPresenceUpdate("paused", jid);

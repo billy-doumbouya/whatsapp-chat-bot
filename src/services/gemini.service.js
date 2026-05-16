@@ -2,8 +2,10 @@ import axios from "axios";
 import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
 
-const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+const OPEN_ROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+
 const MAX_RETRIES = 2;
+
 const FALLBACK_REPLIES = [
   "Je reviens vers toi dans un moment 🙏",
   "Pas dispo là, je te rappelle bientôt.",
@@ -14,58 +16,81 @@ function getRandomFallback() {
   return FALLBACK_REPLIES[Math.floor(Math.random() * FALLBACK_REPLIES.length)];
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function askGemini(prompt, attempt = 0) {
-  const url = `${GEMINI_BASE}/${env.gemini.model}:generateContent?key=${env.gemini.apiKey}`;
-
-  const body = {
-    system_instruction: {
-      parts: [{ text: env.bot.persona }],
-    },
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: prompt }],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.85,
-      maxOutputTokens: 300,
-      topP: 0.95,
-    },
-    safetySettings: [
-      {
-        category: "HARM_CATEGORY_HARASSMENT",
-        threshold: "BLOCK_ONLY_HIGH",
-      },
-      {
-        category: "HARM_CATEGORY_HATE_SPEECH",
-        threshold: "BLOCK_ONLY_HIGH",
-      },
-    ],
-  };
-
   try {
-    const res = await axios.post(url, body, { timeout: 30_000 });
-    const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const body = {
+      model: env.gemini.model,
 
-    if (!text) {
-      throw new Error("Empty response from Gemini");
+      messages: [
+        {
+          role: "system",
+          content: env.bot.persona,
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+
+      temperature: 0.85,
+      max_tokens: 300,
+      top_p: 0.95,
+    };
+
+    const response = await axios.post(OPEN_ROUTER_URL, body, {
+      timeout: 30000,
+
+      headers: {
+        Authorization: `Bearer ${env.gemini.apiKey}`,
+        "Content-Type": "application/json",
+
+        // recommandé par OpenRouter
+        "HTTP-Referer": env.app.url || "http://localhost:3000",
+        "X-Title": env.app.name || "WhatsApp Bot",
+      },
+    });
+
+    const text = response.data?.choices?.[0]?.message?.content;
+
+    if (!text || typeof text !== "string") {
+      throw new Error("Empty response from OpenRouter");
     }
 
     return text.trim();
   } catch (err) {
     const status = err.response?.status;
+
     const detail = err.response?.data?.error?.message || err.message;
 
-    logger.error({ status, detail, attempt }, "[Gemini] Request failed");
+    logger.error(
+      {
+        status,
+        detail,
+        attempt,
+      },
+      "[Gemini/OpenRouter] Request failed",
+    );
 
+    // retry intelligent
     if (attempt < MAX_RETRIES) {
-      logger.info({ attempt: attempt + 1 }, "[Gemini] Retrying...");
-      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+      const delay = 1000 * (attempt + 1);
+
+      logger.info(
+        { retry: attempt + 1, delay },
+        "[Gemini/OpenRouter] Retrying...",
+      );
+
+      await sleep(delay);
+
       return askGemini(prompt, attempt + 1);
     }
 
-    logger.warn("[Gemini] All retries failed, using fallback reply");
+    logger.warn("[Gemini/OpenRouter] All retries failed");
+
     return getRandomFallback();
   }
 }

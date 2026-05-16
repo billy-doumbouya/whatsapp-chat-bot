@@ -13,6 +13,12 @@ const groq = new Groq({ apiKey: env.groqApiKey });
 export async function transcribeAudio(audioBuffer, mimeType = "audio/ogg") {
   try {
     // Groq attend un File-like object
+    console.log("=== TRANSCRIPTION START ===");
+    console.log("MIME:", mimeType);
+    console.log("BUFFER SIZE:", audioBuffer?.length);
+
+    const file = new File([audioBuffer], "audio.ogg", { type: mimeType });
+    console.log("FILE created:", file.size);
     const file = new File([audioBuffer], "audio.ogg", { type: mimeType });
 
     const transcription = await groq.audio.transcriptions.create({

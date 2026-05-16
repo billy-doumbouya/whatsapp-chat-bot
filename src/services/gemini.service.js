@@ -16,80 +16,73 @@ function getRandomFallback() {
   return FALLBACK_REPLIES[Math.floor(Math.random() * FALLBACK_REPLIES.length)];
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export async function askGemini(prompt, attempt = 0) {
+  console.log("ASK GEMINI CALLED");
+  console.log("PROMPT:", prompt);
   try {
-    const body = {
-      model: env.gemini.model,
+    console.log("MODEL:", env.gemini.model);
+    console.log("KEY EXISTS:", !!env.gemini.apiKey);
+    const response = await axios.post(
+      OPEN_ROUTER_URL,
+      {
+        model: env.gemini.model,
 
-      messages: [
-        {
-          role: "system",
-          content: env.bot.persona,
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
+        messages: [
+          {
+            role: "system",
+            content: env.bot.persona,
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
 
-      temperature: 0.85,
-      max_tokens: 300,
-      top_p: 0.95,
-    };
-
-    const response = await axios.post(OPEN_ROUTER_URL, body, {
-      timeout: 30000,
-
-      headers: {
-        Authorization: `Bearer ${env.gemini.apiKey}`,
-        "Content-Type": "application/json",
-
-        // recommandé par OpenRouter
-        "HTTP-Referer": env.app_url || "http://localhost:3000",
-        "X-Title": env.app_name || "WhatsApp Bot",
+        temperature: 0.8,
+        max_tokens: 300,
       },
-    });
+      {
+        headers: {
+          Authorization: `Bearer ${env.gemini.apiKey}`,
+          "Content-Type": "application/json",
+        },
+
+        timeout: 30000,
+      },
+    );
+
+    console.log("OPENROUTER RESPONSE:", JSON.stringify(response.data, null, 2));
 
     const text = response.data?.choices?.[0]?.message?.content;
 
-    if (!text || typeof text !== "string") {
-      throw new Error("Empty response from OpenRouter");
+    if (!text) {
+      throw new Error("Empty response");
     }
 
     return text.trim();
   } catch (err) {
+    console.log("========== OPENROUTER ERROR ==========");
+    console.error("OPENROUTER ERROR:", err.response?.data || err.message);
+
+    console.log(err.response?.status);
+
+    console.log(JSON.stringify(err.response?.data, null, 2));
+
+    console.log(err.message);
+
+    console.log("======================================");
+
     const status = err.response?.status;
 
     const detail = err.response?.data?.error?.message || err.message;
 
-    logger.error(
-      {
-        status,
-        detail,
-        attempt,
-      },
-      "[Gemini/OpenRouter] Request failed",
-    );
+    logger.error({ status, detail, attempt }, "[OpenRouter] Request failed");
 
-    // retry intelligent
     if (attempt < MAX_RETRIES) {
-      const delay = 1000 * (attempt + 1);
-
-      logger.info(
-        { retry: attempt + 1, delay },
-        "[Gemini/OpenRouter] Retrying...",
-      );
-
-      await sleep(delay);
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
 
       return askGemini(prompt, attempt + 1);
     }
-
-    logger.warn("[Gemini/OpenRouter] All retries failed");
 
     return getRandomFallback();
   }

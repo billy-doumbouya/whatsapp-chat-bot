@@ -19,7 +19,6 @@ export async function transcribeAudio(audioBuffer, mimeType = "audio/ogg") {
 
     const file = new File([audioBuffer], "audio.ogg", { type: mimeType });
     console.log("FILE created:", file.size);
-    const file = new File([audioBuffer], "audio.ogg", { type: mimeType });
 
     const transcription = await groq.audio.transcriptions.create({
       file,

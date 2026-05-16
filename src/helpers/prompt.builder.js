@@ -1,28 +1,40 @@
 import { env } from "../config/env.js";
 
+const CONTEXT_WINDOW = 10;
+
 /**
- * Builds the full prompt sent to Gemini
- * @param {Array} history - last N messages from DB
- * @param {string} userMessage - current incoming message
+ * Builds the full prompt sent to the AI
+ * @param {Array} history
+ * @param {string} userMessage
+ * @param {boolean} isWife
+ * @param {string|null} contactName
  * @returns {string}
  */
-export function buildPrompt(history, userMessage) {
-  // Build conversation context
+export function buildPrompt(
+  history,
+  userMessage,
+  isWife = false,
+  contactName = null,
+) {
   const context = history
+    .slice(-CONTEXT_WINDOW)
     .map((msg) => `${msg.role === "user" ? "Ami" : "Moi"}: ${msg.content}`)
     .join("\n");
 
-  return `${env.bot.persona}
+  // Injection du contexte spécial si c'est Sara
+  const wifeContext = isWife
+    ? `\n⚠️ IMPORTANT : Ce message vient de ta femme ${env.bot.wifeName} (Sarata Condé). 
+Réponds de façon tendre, affectueuse et intime. 
+Tu peux l'appeler "chérie", "Sara", "mon amour" selon le contexte.
+Sois attentionné, doux, présent. C'est ta femme — traite-la différemment des autres contacts.\n`
+    : "";
 
-Règles importantes:
-- Réponds toujours en première personne comme si c'était toi qui écris.
-- Sois naturel et concis (2-4 phrases max sauf si la question nécessite plus).
-- Ne mentionne jamais que tu es une IA ou un bot.
-- Si quelqu'un demande si tu es un bot, réponds de façon évasive et naturelle.
-- Adapte ton ton à celui de l'ami (formel, informel, blague...).
-- Si le message est ambigu, réponds simplement ou demande une clarification courte.
+  const nameContext =
+    contactName && !isWife
+      ? `\nLa personne qui t'écrit s'appelle ${contactName}. Tu peux utiliser son prénom naturellement dans la conversation.\n`
+      : "";
 
-${context ? `Historique de la conversation:\n${context}\n` : ""}
+  return `${wifeContext}${nameContext}${context ? `Historique de la conversation:\n${context}\n` : ""}
 Ami: ${userMessage}
-Moi:`;
+Moi:`.trim();
 }

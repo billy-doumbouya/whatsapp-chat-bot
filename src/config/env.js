@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Bio } from "../data/bio.js";
 
-const required = ["MONGO_URI", "GEMINI_API_KEY"];
+const required = ["MONGO_URI", "OPENROUTER_API_KEY"];
 
 for (const key of required) {
   if (!process.env[key]) {

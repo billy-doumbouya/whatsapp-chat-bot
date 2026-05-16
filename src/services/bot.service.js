@@ -24,7 +24,7 @@ export async function handleIncomingMessage(
 ) {
   // 1. Ignorer les messages reçus AVANT le démarrage du bot (flood offline)
   const msgTime = (messageTimestamp || 0) * 1000; // Baileys donne en secondes
-  if (msgTime && msgTime < BOT_START_TIME - 5000) {
+  if (msgTime && msgTime < BOT_START_TIME - 180_000) {
     logger.debug(
       { jid, msgTime },
       "[Bot] Skipping old message (offline flood)",

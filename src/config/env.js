@@ -13,6 +13,8 @@ for (const key of required) {
 export const env = {
   port: parseInt(process.env.PORT || "3000", 10),
   nodeEnv: process.env.NODE_ENV || "development",
+  app_url: process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`,
+  app_name: process.env.APP_NAME || "WhatsApp Bot",
   isDev: process.env.NODE_ENV !== "production",
 
   mongoUri: process.env.MONGO_URI,

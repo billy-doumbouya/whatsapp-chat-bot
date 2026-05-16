@@ -49,8 +49,8 @@ export async function askGemini(prompt, attempt = 0) {
         "Content-Type": "application/json",
 
         // recommandé par OpenRouter
-        "HTTP-Referer": env.app.url || "http://localhost:3000",
-        "X-Title": env.app.name || "WhatsApp Bot",
+        "HTTP-Referer": env.app_url || "http://localhost:3000",
+        "X-Title": env.app_name || "WhatsApp Bot",
       },
     });
 

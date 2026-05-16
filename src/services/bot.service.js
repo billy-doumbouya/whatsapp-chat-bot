@@ -3,7 +3,7 @@ import { logger } from "../config/logger.js";
 import { getHistory, saveMessage } from "./memory.service.js";
 import { askGemini } from "./gemini.service.js";
 import { buildPrompt } from "../helpers/prompt.builder.js";
-import { sendMessage, downloadAudio } from "./whatsapp.client.js";
+import { sendMessage } from "./whatsapp.client.js";
 import { isRateLimited } from "../middleware/rateLimiter.js";
 import { transcribeAudio } from "./transcription.service.js";
 

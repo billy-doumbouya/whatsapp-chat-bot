@@ -9,10 +9,8 @@ import { transcribeAudio } from "./transcription.service.js";
 import { textToSpeech } from "./Tst.services.js";
 
 let paused = false;
-
-// Si true, le bot répond en vocal quand le message reçu était un vocal
-// Configurable via env VOICE_REPLY=true
-const VOICE_REPLY_ENABLED = process.env.VOICE_REPLY === "true";
+// Activable via !voice on / !voice off ou variable VOICE_REPLY=true dans Railway
+let voiceReplyEnabled = process.env.VOICE_REPLY === "true";
 
 export async function handleIncomingMessage(
   sock,
@@ -52,7 +50,7 @@ export async function handleIncomingMessage(
     if (handled) return;
   }
 
-  // 3. Pause — ignorer tous les messages si le bot est en pause
+  // 3. Pause
   if (paused) {
     logger.debug({ jid }, "[Bot] Paused — message ignored");
     return;
@@ -67,8 +65,7 @@ export async function handleIncomingMessage(
   // 6. Détection contact spécial
   const isWife = !!(env.bot.wifeJid && jid === env.bot.wifeJid);
 
-  // 7. Transcription vocal si audio
-  // On note si le message original était un vocal pour adapter la réponse
+  // 7. Transcription vocal
   const wasVoiceMessage = !!audioBuffer;
   let finalText = text;
 
@@ -76,6 +73,7 @@ export async function handleIncomingMessage(
     logger.info({ jid }, "[Bot] Transcribing audio...");
     const transcribed = await transcribeAudio(audioBuffer, audioMime);
     if (transcribed) {
+      // Préfixe [Vocal] pour que le persona sache que c'est un vocal transcrit
       finalText = `[Vocal] ${transcribed}`;
       logger.info({ jid, transcribed }, "[Bot] Audio transcribed");
     } else {
@@ -103,8 +101,8 @@ export async function handleIncomingMessage(
     const reply = await askGemini(prompt);
     await saveMessage(jid, "ai", reply);
 
-    // 8. Répondre en vocal si le message reçu était un vocal ET VOICE_REPLY activé
-    if (wasVoiceMessage && VOICE_REPLY_ENABLED) {
+    // 8. Répondre en vocal si message vocal reçu ET voiceReply activé
+    if (wasVoiceMessage && voiceReplyEnabled) {
       logger.info({ jid }, "[Bot] Generating voice reply...");
       const audioReply = await textToSpeech(reply);
       if (audioReply) {
@@ -112,7 +110,6 @@ export async function handleIncomingMessage(
         logger.info({ jid }, "[Bot] Voice reply sent ✓");
         return;
       }
-      // Si TTS échoue, fallback sur texte
       logger.warn({ jid }, "[Bot] TTS failed, falling back to text");
     }
 
@@ -146,31 +143,33 @@ async function handleOwnerCommand(jid, text) {
 
   if (cmd === "!status") {
     const uptimeMin = Math.floor(process.uptime() / 60);
-    const voiceStatus = VOICE_REPLY_ENABLED ? "✅ activée" : "❌ désactivée";
-    const statusText = [
-      `État : ${paused ? "⏸ en pause" : "▶️ actif"}`,
-      `Uptime : ${uptimeMin} min`,
-      `Réponse vocale : ${voiceStatus}`,
-      `Owner JID : ${env.bot.ownerJid ?? "non défini"}`,
-    ].join("\n");
-    await sendMessage(jid, statusText);
+    await sendMessage(
+      jid,
+      [
+        `État : ${paused ? "⏸ en pause" : "▶️ actif"}`,
+        `Uptime : ${uptimeMin} min`,
+        `Réponse vocale : ${voiceReplyEnabled ? "✅ activée" : "❌ désactivée"}`,
+        `Owner JID : ${env.bot.ownerJid ?? "non défini"}`,
+      ].join("\n"),
+    );
     return true;
   }
 
-  // Activer/désactiver la réponse vocale à la volée
   if (cmd === "!voice on") {
-    process.env.VOICE_REPLY = "true";
+    voiceReplyEnabled = true;
     await sendMessage(jid, "🔊 Réponses vocales activées.");
+    logger.info("[Bot] Voice reply enabled");
     return true;
   }
 
   if (cmd === "!voice off") {
-    process.env.VOICE_REPLY = "false";
+    voiceReplyEnabled = false;
     await sendMessage(jid, "🔇 Réponses vocales désactivées.");
+    logger.info("[Bot] Voice reply disabled");
     return true;
   }
 
-  // Pause temporaire : !pause 30 (minutes)
+  // Pause temporaire : !pause 30
   const pauseMatch = cmd.match(/^!pause (\d+)$/);
   if (pauseMatch) {
     const minutes = parseInt(pauseMatch[1], 10);

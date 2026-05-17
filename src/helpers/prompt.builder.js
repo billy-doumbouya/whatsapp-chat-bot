@@ -3,12 +3,13 @@ import { env } from "../config/env.js";
 const CONTEXT_WINDOW = 10;
 
 /**
- * Builds the full prompt sent to the AI
+ * Builds the messages array sent to the AI (OpenAI format)
+ * Retourne un tableau de messages structurés plutôt qu'un bloc texte
  * @param {Array} history
  * @param {string} userMessage
  * @param {boolean} isWife
  * @param {string|null} contactName
- * @returns {string}
+ * @returns {{ systemExtra: string, messages: Array }}
  */
 export function buildPrompt(
   history,
@@ -16,25 +17,26 @@ export function buildPrompt(
   isWife = false,
   contactName = null,
 ) {
-  const context = history
-    .slice(-CONTEXT_WINDOW)
-    .map((msg) => `${msg.role === "user" ? "Ami" : "Moi"}: ${msg.content}`)
-    .join("\n");
+  // Contexte injecté dans le system prompt
+  let systemExtra = "";
 
-  // Injection du contexte spécial si c'est Sara
-  const wifeContext = isWife
-    ? `\n⚠️ IMPORTANT : Ce message vient de ta femme ${env.bot.wifeName} (Sarata Condé). 
-Réponds de façon tendre, affectueuse et intime. 
-Tu peux l'appeler "chérie", "Sara", "mon amour" selon le contexte.
-Sois attentionné, doux, présent. C'est ta femme — traite-la différemment des autres contacts.\n`
-    : "";
+  if (isWife) {
+    systemExtra = `\nATTENTION : Ce message vient de ta femme ${env.bot.wifeName}. Réponds de façon tendre et affectueuse. Tu peux l'appeler "chérie", "Sara", "mon amour" selon le contexte.`;
+  } else if (contactName) {
+    systemExtra = `\nLa personne qui t'écrit s'appelle ${contactName}.`;
+  }
 
-  const nameContext =
-    contactName && !isWife
-      ? `\nLa personne qui t'écrit s'appelle ${contactName}. Tu peux utiliser son prénom naturellement dans la conversation.\n`
-      : "";
+  // Historique en format messages structurés
+  const historyMessages = history.slice(-CONTEXT_WINDOW).map((msg) => ({
+    role: msg.role === "ai" ? "assistant" : "user",
+    content: msg.content,
+  }));
 
-  return `${wifeContext}${nameContext}${context ? `Historique de la conversation:\n${context}\n` : ""}
-Ami: ${userMessage}
-Moi:`.trim();
+  // Message actuel
+  historyMessages.push({
+    role: "user",
+    content: userMessage,
+  });
+
+  return { systemExtra, messages: historyMessages };
 }

@@ -79,6 +79,10 @@ export async function startWhatsApp(onMessage) {
 async function handleRawMessage(sock, msg, onMessage) {
   if (!msg.message || msg.key.fromMe) return;
 
+ 
+  console.log("RAW JID:", JSON.stringify(msg.key.remoteJid));
+  console.log("OWNER_JID ENV:", JSON.stringify(process.env.OWNER_JID));
+  
   const jid = msg.key.remoteJid;
   const contactName = msg.pushName || null;
   const messageTimestamp = msg.messageTimestamp;

@@ -57,7 +57,7 @@ export async function handleIncomingMessage(
     logger.info({ jid }, "[Bot] Transcribing audio...");
     const transcribed = await transcribeAudio(audioBuffer, audioMime);
     if (transcribed) {
-      finalText = `[Vocal] ${transcribed}`;
+      finalText = transcribed;
       logger.info({ jid, transcribed }, "[Bot] Audio transcribed");
     } else {
       // Transcription échouée — réponse générique

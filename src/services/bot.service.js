@@ -7,7 +7,6 @@ import { sendMessage } from "./whatsapp.client.js";
 import { isRateLimited } from "../middleware/rateLimiter.js";
 import { transcribeAudio } from "./transcription.service.js";
 
-const BOT_START_TIME = Date.now();
 let paused = false;
 
 export async function handleIncomingMessage(
@@ -25,22 +24,13 @@ export async function handleIncomingMessage(
     hasAudio: !!audioBuffer,
   });
 
-  // 1. Flood filter — ignorer les messages antérieurs au démarrage du bot
-  const msgTime = (messageTimestamp || 0) * 1000;
-  if (msgTime && msgTime < BOT_START_TIME - 180_000) {
-    logger.debug({ jid }, "[Bot] Skipping old message");
-    return;
-  }
-
-  // 2. Ignorer les groupes sauf si configuré
+  // 1. Ignorer les groupes sauf si configuré
   if (jid.endsWith("@g.us") && !env.bot.replyGroups) return;
 
-  // 3. Commandes owner
-  // IMPORTANT : ownerJid doit être au format complet ex: "22412345678@s.whatsapp.net"
-  // Vérification stricte + log pour diagnostic
+  // 2. Commandes owner
+  // ownerJid doit être au format exact retourné par Baileys ex: "1349240520771@lid"
   const isOwner = !!(env.bot.ownerJid && jid === env.bot.ownerJid);
 
-  // Log systématique pour diagnostiquer les problèmes de ownerJid
   if (text?.startsWith("!")) {
     logger.info(
       {
@@ -58,22 +48,22 @@ export async function handleIncomingMessage(
     if (handled) return;
   }
 
-  // 4. Pause — si le bot est en pause, ignorer tous les messages non-owner
+  // 3. Pause — ignorer tous les messages si le bot est en pause
   if (paused) {
     logger.debug({ jid }, "[Bot] Paused — message ignored");
     return;
   }
 
-  // 5. Rate limit
+  // 4. Rate limit
   if (isRateLimited(jid)) return;
 
-  // 6. Commandes publiques
+  // 5. Commandes publiques
   if (await handlePublicCommand(jid, text)) return;
 
-  // 7. Détection contact spécial (femme)
+  // 6. Détection contact spécial
   const isWife = !!(env.bot.wifeJid && jid === env.bot.wifeJid);
 
-  // 8. Transcription vocal si audio
+  // 7. Transcription vocal si audio
   let finalText = text;
   if (audioBuffer) {
     logger.info({ jid }, "[Bot] Transcribing audio...");
@@ -114,16 +104,14 @@ export async function handleIncomingMessage(
 }
 
 async function handleOwnerCommand(jid, text) {
-  // Nettoyage strict : trim + lowercase + suppression des espaces invisibles unicode
   const cmd = text?.trim().replace(/\s+/g, " ").toLowerCase();
-
   if (!cmd) return false;
 
   if (cmd === "!pause") {
     paused = true;
     await sendMessage(
       jid,
-      `⏸ Bot en pause. Je prends la main.\nEnvoie !resume pour réactiver.`,
+      "⏸ Bot en pause. Je prends la main.\nEnvoie !resume pour réactiver.",
     );
     logger.info("[Bot] Bot mis en pause par owner");
     return true;
@@ -147,7 +135,7 @@ async function handleOwnerCommand(jid, text) {
     return true;
   }
 
-  // Pause temporaire avec durée : !pause 30 (minutes)
+  // Pause temporaire : !pause 30 (minutes)
   const pauseMatch = cmd.match(/^!pause (\d+)$/);
   if (pauseMatch) {
     const minutes = parseInt(pauseMatch[1], 10);

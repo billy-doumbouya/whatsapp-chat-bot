@@ -11,9 +11,14 @@ let sock = null;
 let currentQR = null;
 let isConnected = false;
 
+// Timestamp en secondes (même unité que msg.messageTimestamp de Baileys)
+// Tous les messages antérieurs à ce moment seront ignorés
+const BOT_START_TIME = Math.floor(Date.now() / 1000);
+
 export function getCurrentQR() {
   return currentQR;
 }
+
 export function getConnectionStatus() {
   return isConnected;
 }
@@ -21,7 +26,6 @@ export function getConnectionStatus() {
 export async function startWhatsApp(onMessage) {
   const { state, saveCreds } = await useMongoAuthState();
   const { version } = await fetchLatestBaileysVersion();
-
   logger.info({ version }, "[WA] Baileys version");
 
   sock = makeWASocket({
@@ -46,16 +50,19 @@ export async function startWhatsApp(onMessage) {
         "[WA] QR ready — ouvre /api/qr dans ton navigateur pour scanner",
       );
     }
+
     if (connection === "open") {
       currentQR = null;
       isConnected = true;
       logger.info("[WA] Connected to WhatsApp ✓");
     }
+
     if (connection === "close") {
       isConnected = false;
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       logger.warn({ statusCode }, "[WA] Connection closed");
+
       if (shouldReconnect) {
         logger.info("[WA] Reconnecting in 3s...");
         setTimeout(() => startWhatsApp(onMessage), 3000);
@@ -79,13 +86,20 @@ export async function startWhatsApp(onMessage) {
 async function handleRawMessage(sock, msg, onMessage) {
   if (!msg.message || msg.key.fromMe) return;
 
- 
-  console.log("RAW JID:", JSON.stringify(msg.key.remoteJid));
-  console.log("OWNER_JID ENV:", JSON.stringify(process.env.OWNER_JID));
-  
   const jid = msg.key.remoteJid;
+  const msgTimestamp = msg.messageTimestamp || 0;
+
+  // Ignorer tous les messages antérieurs au démarrage du bot
+  // Évite que Baileys rejoue les messages bufferisés à la reconnexion
+  if (msgTimestamp < BOT_START_TIME) {
+    logger.debug(
+      { jid, msgTimestamp, BOT_START_TIME },
+      "[WA] Skipping pre-boot message",
+    );
+    return;
+  }
+
   const contactName = msg.pushName || null;
-  const messageTimestamp = msg.messageTimestamp;
 
   // Message texte
   const text =
@@ -107,7 +121,7 @@ async function handleRawMessage(sock, msg, onMessage) {
         jid,
         null,
         contactName,
-        messageTimestamp,
+        msgTimestamp,
         audioBuffer,
         mime,
       );
@@ -126,7 +140,7 @@ async function handleRawMessage(sock, msg, onMessage) {
     jid,
     text.trim(),
     contactName,
-    messageTimestamp,
+    msgTimestamp,
     null,
     null,
   );
@@ -134,11 +148,13 @@ async function handleRawMessage(sock, msg, onMessage) {
 
 export async function sendMessage(jid, text, delayMs = 0) {
   if (!sock) throw new Error("WhatsApp client not initialized");
+
   if (delayMs > 0) {
     await sock.sendPresenceUpdate("composing", jid);
     await new Promise((r) => setTimeout(r, delayMs));
     await sock.sendPresenceUpdate("paused", jid);
   }
+
   await sock.sendMessage(jid, { text });
   logger.debug({ jid }, "[WA] Message sent");
 }

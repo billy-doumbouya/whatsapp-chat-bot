@@ -89,6 +89,13 @@ async function handleRawMessage(sock, msg, onMessage) {
   const jid = msg.key.remoteJid;
   const msgTimestamp = msg.messageTimestamp || 0;
 
+  console.log("[RAW]", {
+    jid,
+    msgTimestamp,
+    BOT_START_TIME,
+    diff: msgTimestamp - BOT_START_TIME,
+  });
+
   // Ignorer tous les messages antérieurs au démarrage du bot
   // Évite que Baileys rejoue les messages bufferisés à la reconnexion
   if (msgTimestamp < BOT_START_TIME) {

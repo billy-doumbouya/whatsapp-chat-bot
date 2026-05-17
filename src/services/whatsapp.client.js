@@ -89,15 +89,15 @@ async function handleRawMessage(sock, msg, onMessage) {
   const jid = msg.key.remoteJid;
   const msgTimestamp = msg.messageTimestamp || 0;
 
+  // LOG DE DIAGNOSTIC — à retirer après confirmation
   console.log("[RAW]", {
     jid,
     msgTimestamp,
     BOT_START_TIME,
-    diff: msgTimestamp - BOT_START_TIME,
+    passed: msgTimestamp >= BOT_START_TIME,
   });
 
   // Ignorer tous les messages antérieurs au démarrage du bot
-  // Évite que Baileys rejoue les messages bufferisés à la reconnexion
   if (msgTimestamp < BOT_START_TIME) {
     logger.debug(
       { jid, msgTimestamp, BOT_START_TIME },
@@ -164,4 +164,28 @@ export async function sendMessage(jid, text, delayMs = 0) {
 
   await sock.sendMessage(jid, { text });
   logger.debug({ jid }, "[WA] Message sent");
+}
+
+/**
+ * Envoie un message vocal (push-to-talk) depuis un buffer MP3
+ * @param {string} jid
+ * @param {Buffer} audioBuffer - buffer MP3
+ * @param {number} delayMs
+ */
+export async function sendVoiceMessage(jid, audioBuffer, delayMs = 0) {
+  if (!sock) throw new Error("WhatsApp client not initialized");
+
+  if (delayMs > 0) {
+    await sock.sendPresenceUpdate("recording", jid);
+    await new Promise((r) => setTimeout(r, delayMs));
+    await sock.sendPresenceUpdate("paused", jid);
+  }
+
+  await sock.sendMessage(jid, {
+    audio: audioBuffer,
+    mimetype: "audio/mp4",
+    ptt: true, // push-to-talk = style vocal WhatsApp
+  });
+
+  logger.debug({ jid }, "[WA] Voice message sent");
 }

@@ -5,34 +5,65 @@ import { logger } from "../config/logger.js";
 const groq = new Groq({ apiKey: env.groqApiKey });
 
 /**
- * Transcrit un buffer audio en texte via Groq Whisper
+ * Maps standard mime-types to their respective file extensions for Groq payload safety
+ * @param {string} mimeType
+ * @returns {string} filename extension
+ */
+function getExtensionFromMime(mimeType) {
+  if (mimeType.includes("ogg") || mimeType.includes("opus")) return "audio.ogg";
+  if (mimeType.includes("mp4") || mimeType.includes("m4a")) return "audio.m4a";
+  if (mimeType.includes("mpeg") || mimeType.includes("mp3")) return "audio.mp3";
+  if (mimeType.includes("wav")) return "audio.wav";
+  return "audio.ogg";
+}
+
+/**
+ * Transcribes an audio buffer and returns both text and the auto-detected language
  * @param {Buffer} audioBuffer
- * @param {string} mimeType - ex: "audio/ogg"
- * @returns {Promise<string|null>}
+ * @param {string} mimeType
+ * @returns {Promise<{ text: string, language: string } | null>}
  */
 export async function transcribeAudio(audioBuffer, mimeType = "audio/ogg") {
   try {
-    // Groq attend un File-like object
+    if (!audioBuffer || audioBuffer.length === 0) {
+      logger.warn("[Transcription] Aborted: Empty or missing audio buffer");
+      return null;
+    }
+
     console.log("=== TRANSCRIPTION START ===");
     console.log("MIME:", mimeType);
-    console.log("BUFFER SIZE:", audioBuffer?.length);
+    console.log("BUFFER SIZE (bytes):", audioBuffer.length);
 
-    const file = new File([audioBuffer], "audio.ogg", { type: mimeType });
-    console.log("FILE created:", file.size);
+    const filename = getExtensionFromMime(mimeType);
 
-    const transcription = await groq.audio.transcriptions.create({
-      file,
-      model: "whisper-large-v3-turbo", // gratuit, ultra rapide
-      language: "fr",
-      response_format: "text",
+    // Safely transform buffer into a multipart payload compatible with Node.js environments
+    const filePayload = await Groq.toFile(audioBuffer, filename, {
+      type: mimeType,
     });
 
-    logger.info("[Transcription] Audio transcribed successfully");
-    return typeof transcription === "string"
-      ? transcription.trim()
-      : transcription?.text?.trim() || null;
+    // Request verbose_json format to extract language metrics from the model stream
+    const transcription = await groq.audio.transcriptions.create({
+      file: filePayload,
+      model: "whisper-large-v3-turbo",
+      response_format: "verbose_json",
+    });
+
+    const text = transcription.text?.trim() || null;
+    const language = transcription.language || "french";
+
+    if (!text) return null;
+
+    logger.info({ language }, "[Transcription] Audio transcribed successfully");
+    return { text, language };
   } catch (err) {
-    logger.error({ err: err.message }, "[Transcription] Failed");
+    logger.error(
+      {
+        message: err.message,
+        status: err?.status,
+        code: err?.code,
+      },
+      "[Transcription] Failed",
+    );
     return null;
   }
 }

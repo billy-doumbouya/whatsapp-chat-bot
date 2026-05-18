@@ -9,8 +9,23 @@ import { transcribeAudio } from "./transcription.service.js";
 import { textToSpeech } from "./Tst.services.js";
 
 let paused = false;
-// Activable via !voice on / !voice off ou variable VOICE_REPLY=true dans Railway
 let voiceReplyEnabled = process.env.VOICE_REPLY === "true";
+
+// Messages de clôture — pas de réponse nécessaire
+const CLOSING_PATTERNS = [
+  /^(ok|okay)\.?$/i,
+  /^(merci|thanks|thank you|thx)\.?$/i,
+  /^(d'accord|dac|ok dac)\.?$/i,
+  /^(bonne journée|bonne nuit|bonsoir)\.?$/i,
+  /^(bye|au revoir|à bientôt|ciao)\.?$/i,
+  /^(👍|🙏|✅|😊|🤝)+$/,
+  /^(c'est bon|c est bon|nickel|parfait|super)\.?$/i,
+];
+
+function isClosingMessage(text) {
+  if (!text) return false;
+  return CLOSING_PATTERNS.some((p) => p.test(text.trim()));
+}
 
 export async function handleIncomingMessage(
   sock,
@@ -27,7 +42,7 @@ export async function handleIncomingMessage(
     hasAudio: !!audioBuffer,
   });
 
-  // 1. Ignorer les groupes sauf si configuré
+  // 1. Ignorer les groupes
   if (jid.endsWith("@g.us") && !env.bot.replyGroups) return;
 
   // 2. Commandes owner
@@ -62,20 +77,25 @@ export async function handleIncomingMessage(
   // 5. Commandes publiques
   if (await handlePublicCommand(jid, text)) return;
 
-  // 6. Détection contact spécial
+  // 6. Contact spécial
   const isWife = !!(env.bot.wifeJid && jid === env.bot.wifeJid);
 
   // 7. Transcription vocal
   const wasVoiceMessage = !!audioBuffer;
   let finalText = text;
+  let detectedLanguage = "french"; // défaut
 
   if (audioBuffer) {
     logger.info({ jid }, "[Bot] Transcribing audio...");
-    const transcribed = await transcribeAudio(audioBuffer, audioMime);
-    if (transcribed) {
-      // Préfixe [Vocal] pour que le persona sache que c'est un vocal transcrit
-      finalText = `[Vocal] ${transcribed}`;
-      logger.info({ jid, transcribed }, "[Bot] Audio transcribed");
+    const result = await transcribeAudio(audioBuffer, audioMime);
+
+    if (result?.text) {
+      finalText = `[Vocal] ${result.text}`;
+      detectedLanguage = result.language || "french";
+      logger.info(
+        { jid, language: detectedLanguage, text: result.text },
+        "[Bot] Audio transcribed",
+      );
     } else {
       await sendMessage(
         jid,
@@ -88,10 +108,22 @@ export async function handleIncomingMessage(
 
   if (!finalText) return;
 
+  // 8. Ignorer messages de clôture (texte uniquement, pas les vocaux)
+  if (!wasVoiceMessage && isClosingMessage(finalText)) {
+    logger.debug({ jid, finalText }, "[Bot] Closing message — no reply");
+    return;
+  }
+
   try {
     await saveMessage(jid, "user", finalText, contactName);
     const history = await getHistory(jid);
-    const prompt = buildPrompt(history, finalText, isWife, contactName);
+    const prompt = buildPrompt(
+      history,
+      finalText,
+      isWife,
+      contactName,
+      detectedLanguage,
+    );
 
     logger.debug(
       { jid, isWife, historyLength: history.length },
@@ -101,16 +133,20 @@ export async function handleIncomingMessage(
     const reply = await askGemini(prompt);
     await saveMessage(jid, "ai", reply);
 
-    // 8. Répondre en vocal si message vocal reçu ET voiceReply activé
-    if (wasVoiceMessage && voiceReplyEnabled) {
-      logger.info({ jid }, "[Bot] Generating voice reply...");
-      const audioReply = await textToSpeech(reply);
+    // 9. Répondre en vocal si message vocal reçu
+    if (wasVoiceMessage) {
+      logger.info(
+        { jid, language: detectedLanguage },
+        "[Bot] Generating voice reply...",
+      );
+      const audioReply = await textToSpeech(reply, detectedLanguage);
       if (audioReply) {
         await sendVoiceMessage(jid, audioReply, env.bot.typingDelayMs);
         logger.info({ jid }, "[Bot] Voice reply sent ✓");
         return;
       }
-      logger.warn({ jid }, "[Bot] TTS failed, falling back to text");
+      // TTS échoué — fallback texte
+      logger.warn({ jid }, "[Bot] TTS failed — falling back to text");
     }
 
     await sendMessage(jid, reply, env.bot.typingDelayMs);
@@ -148,24 +184,10 @@ async function handleOwnerCommand(jid, text) {
       [
         `État : ${paused ? "⏸ en pause" : "▶️ actif"}`,
         `Uptime : ${uptimeMin} min`,
-        `Réponse vocale : ${voiceReplyEnabled ? "✅ activée" : "❌ désactivée"}`,
+        `Réponse vocale auto : ✅ activée sur vocaux reçus`,
         `Owner JID : ${env.bot.ownerJid ?? "non défini"}`,
       ].join("\n"),
     );
-    return true;
-  }
-
-  if (cmd === "!voice on") {
-    voiceReplyEnabled = true;
-    await sendMessage(jid, "🔊 Réponses vocales activées.");
-    logger.info("[Bot] Voice reply enabled");
-    return true;
-  }
-
-  if (cmd === "!voice off") {
-    voiceReplyEnabled = false;
-    await sendMessage(jid, "🔇 Réponses vocales désactivées.");
-    logger.info("[Bot] Voice reply disabled");
     return true;
   }
 

@@ -11,8 +11,7 @@ let sock = null;
 let currentQR = null;
 let isConnected = false;
 
-// Timestamp en secondes (même unité que msg.messageTimestamp de Baileys)
-// Tous les messages antérieurs à ce moment seront ignorés
+// Ignore all messages received before the script started (timestamps in seconds)
 const BOT_START_TIME = Math.floor(Date.now() / 1000);
 
 export function getCurrentQR() {
@@ -46,9 +45,7 @@ export async function startWhatsApp(onMessage) {
     if (qr) {
       currentQR = qr;
       isConnected = false;
-      logger.info(
-        "[WA] QR ready — ouvre /api/qr dans ton navigateur pour scanner",
-      );
+      logger.info("[WA] QR ready — Open /api/qr in your browser to scan");
     }
 
     if (connection === "open") {
@@ -67,7 +64,7 @@ export async function startWhatsApp(onMessage) {
         logger.info("[WA] Reconnecting in 3s...");
         setTimeout(() => startWhatsApp(onMessage), 3000);
       } else {
-        logger.error("[WA] Logged out.");
+        logger.error("[WA] Logged out permanently.");
         process.exit(1);
       }
     }
@@ -89,15 +86,7 @@ async function handleRawMessage(sock, msg, onMessage) {
   const jid = msg.key.remoteJid;
   const msgTimestamp = msg.messageTimestamp || 0;
 
-  // LOG DE DIAGNOSTIC — à retirer après confirmation
-  console.log("[RAW]", {
-    jid,
-    msgTimestamp,
-    BOT_START_TIME,
-    passed: msgTimestamp >= BOT_START_TIME,
-  });
-
-  // Ignorer tous les messages antérieurs au démarrage du bot
+  // Skip outdated historical messages
   if (msgTimestamp < BOT_START_TIME) {
     logger.debug(
       { jid, msgTimestamp, BOT_START_TIME },
@@ -108,11 +97,11 @@ async function handleRawMessage(sock, msg, onMessage) {
 
   const contactName = msg.pushName || null;
 
-  // Message texte
+  // Process Text Content
   const text =
     msg.message?.conversation || msg.message?.extendedTextMessage?.text || null;
 
-  // Message vocal (audioMessage ou pttMessage = push-to-talk)
+  // Process Voice Note Content
   const isAudio = !!msg.message?.audioMessage || !!msg.message?.pttMessage;
 
   if (isAudio) {
@@ -123,6 +112,7 @@ async function handleRawMessage(sock, msg, onMessage) {
         msg.message?.audioMessage?.mimetype ||
         msg.message?.pttMessage?.mimetype ||
         "audio/ogg";
+
       await onMessage(
         sock,
         jid,
@@ -134,12 +124,17 @@ async function handleRawMessage(sock, msg, onMessage) {
       );
     } catch (err) {
       logger.error({ err }, "[WA] Failed to download audio");
-      await sendMessage(jid, "Reçu, je regarde ça dès que je peux 👍");
+      // FIXED: Directly used the scoped sock parameter to avoid uninitialized variable crashes
+      await sock
+        .sendMessage(jid, { text: "Reçu, je regarde ça dès que je peux 👍" })
+        .catch((e) => {
+          logger.error({ e }, "[WA] Fallback message failed");
+        });
     }
     return;
   }
 
-  // Ignorer les non-texte (images sans caption, stickers, etc.)
+  // Filter out unsupported message types (e.g. textless stickers, location markers)
   if (!text || text.trim() === "") return;
 
   await onMessage(
@@ -167,9 +162,9 @@ export async function sendMessage(jid, text, delayMs = 0) {
 }
 
 /**
- * Envoie un message vocal (push-to-talk) depuis un buffer MP3
+ * Sends a push-to-talk voice message directly from an audio buffer
  * @param {string} jid
- * @param {Buffer} audioBuffer - buffer MP3
+ * @param {Buffer} audioBuffer
  * @param {number} delayMs
  */
 export async function sendVoiceMessage(jid, audioBuffer, delayMs = 0) {
@@ -183,8 +178,8 @@ export async function sendVoiceMessage(jid, audioBuffer, delayMs = 0) {
 
   await sock.sendMessage(jid, {
     audio: audioBuffer,
-    mimetype: "audio/mp4",
-    ptt: true, // push-to-talk = style vocal WhatsApp
+    mimetype: "audio/mpeg",
+    ptt: true,
   });
 
   logger.debug({ jid }, "[WA] Voice message sent");

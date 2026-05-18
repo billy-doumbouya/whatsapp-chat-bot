@@ -4,11 +4,11 @@ const CONTEXT_WINDOW = 10;
 
 /**
  * Builds the messages array sent to the AI (OpenAI format)
- * Retourne un tableau de messages structurés plutôt qu'un bloc texte
  * @param {Array} history
  * @param {string} userMessage
  * @param {boolean} isWife
  * @param {string|null} contactName
+ * @param {string} detectedLanguage - langue détectée par Whisper ex: "french", "english"
  * @returns {{ systemExtra: string, messages: Array }}
  */
 export function buildPrompt(
@@ -16,8 +16,8 @@ export function buildPrompt(
   userMessage,
   isWife = false,
   contactName = null,
+  detectedLanguage = null,
 ) {
-  // Contexte injecté dans le system prompt
   let systemExtra = "";
 
   if (isWife) {
@@ -26,16 +26,20 @@ export function buildPrompt(
     systemExtra = `\nLa personne qui t'écrit s'appelle ${contactName}.`;
   }
 
-  // Historique en format messages structurés
+  // Historique structuré
   const historyMessages = history.slice(-CONTEXT_WINDOW).map((msg) => ({
     role: msg.role === "ai" ? "assistant" : "user",
     content: msg.content,
   }));
 
-  // Message actuel
+  // Instruction langue collée au message — Gemini ne peut pas l'ignorer
+  const langInstruction = detectedLanguage
+    ? `\n\n[Réponds obligatoirement en ${detectedLanguage === "english" ? "anglais" : "français"}]`
+    : "\n\n[Réponds obligatoirement dans la même langue que ce message]";
+
   historyMessages.push({
     role: "user",
-     content: userMessage + "\n\n[Réponds obligatoirement dans la même langue que ce message]",
+    content: userMessage + langInstruction,
   });
 
   return { systemExtra, messages: historyMessages };

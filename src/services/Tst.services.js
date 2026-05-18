@@ -7,10 +7,10 @@ import { logger } from "../config/logger.js";
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const VOICE_CONFIG = {
-  french: { hl: "fr-fr", v: "Hortense" },
-  english: { hl: "en-us", v: "Linda" },
-  mandinka: { hl: "fr-fr", v: "Hortense" },
-  default: { hl: "fr-fr", v: "Hortense" },
+  french: { hl: "fr-fr", v: "Adrien" },
+  english: { hl: "en-us", v: "John" },
+  mandinka: { hl: "fr-fr", v: "Adrien" },
+  default: { hl: "fr-fr", v: "Adrien" },
 };
 
 /**

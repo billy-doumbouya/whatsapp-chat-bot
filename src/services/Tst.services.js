@@ -7,12 +7,12 @@ import { logger } from "../config/logger.js";
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const VOICE_CONFIG = {
-  french: { hl: "fr-fr", v: "Barent" }, // Standard native French Male
-  fr: { hl: "fr-fr", v: "Barent" },
+  french: { hl: "fr-fr", v: "Pierre" }, // Standard native French Male
+  fr: { hl: "fr-fr", v: "Pierre" },
   english: { hl: "en-us", v: "John" }, // Standard native US English Male
   en: { hl: "en-us", v: "John" },
-  mandinka: { hl: "fr-fr", v: "Barent" }, // Fallback to French Male profile
-  default: { hl: "fr-fr", v: "Barent" },
+  mandinka: { hl: "fr-fr", v: "Pierre" }, // Fallback to French Male profile
+  default: { hl: "fr-fr", v: "Pierre" },
 };
 
 /**

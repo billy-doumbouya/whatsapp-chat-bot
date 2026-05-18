@@ -11,7 +11,6 @@ let sock = null;
 let currentQR = null;
 let isConnected = false;
 
-// Ignore all messages received before the script started (timestamps in seconds)
 const BOT_START_TIME = Math.floor(Date.now() / 1000);
 
 export function getCurrentQR() {
@@ -86,7 +85,6 @@ async function handleRawMessage(sock, msg, onMessage) {
   const jid = msg.key.remoteJid;
   const msgTimestamp = msg.messageTimestamp || 0;
 
-  // Skip outdated historical messages
   if (msgTimestamp < BOT_START_TIME) {
     logger.debug(
       { jid, msgTimestamp, BOT_START_TIME },
@@ -97,11 +95,9 @@ async function handleRawMessage(sock, msg, onMessage) {
 
   const contactName = msg.pushName || null;
 
-  // Process Text Content
   const text =
     msg.message?.conversation || msg.message?.extendedTextMessage?.text || null;
 
-  // Process Voice Note Content
   const isAudio = !!msg.message?.audioMessage || !!msg.message?.pttMessage;
 
   if (isAudio) {
@@ -112,7 +108,6 @@ async function handleRawMessage(sock, msg, onMessage) {
         msg.message?.audioMessage?.mimetype ||
         msg.message?.pttMessage?.mimetype ||
         "audio/ogg";
-
       await onMessage(
         sock,
         jid,
@@ -124,7 +119,6 @@ async function handleRawMessage(sock, msg, onMessage) {
       );
     } catch (err) {
       logger.error({ err }, "[WA] Failed to download audio");
-      // FIXED: Directly used the scoped sock parameter to avoid uninitialized variable crashes
       await sock
         .sendMessage(jid, { text: "Reçu, je regarde ça dès que je peux 👍" })
         .catch((e) => {
@@ -134,7 +128,6 @@ async function handleRawMessage(sock, msg, onMessage) {
     return;
   }
 
-  // Filter out unsupported message types (e.g. textless stickers, location markers)
   if (!text || text.trim() === "") return;
 
   await onMessage(
@@ -162,9 +155,9 @@ export async function sendMessage(jid, text, delayMs = 0) {
 }
 
 /**
- * Sends a push-to-talk voice message directly from an audio buffer
+ * Envoie un vocal WhatsApp (PTT) depuis un buffer OGG Opus
  * @param {string} jid
- * @param {Buffer} audioBuffer
+ * @param {Buffer} audioBuffer - OGG Opus buffer
  * @param {number} delayMs
  */
 export async function sendVoiceMessage(jid, audioBuffer, delayMs = 0) {
@@ -178,7 +171,7 @@ export async function sendVoiceMessage(jid, audioBuffer, delayMs = 0) {
 
   await sock.sendMessage(jid, {
     audio: audioBuffer,
-    mimetype: "audio/mpeg",
+    mimetype: "audio/ogg; codecs=opus", // ← format exact requis par WhatsApp PTT
     ptt: true,
   });
 

@@ -1,21 +1,63 @@
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import ffmpeg from "fluent-ffmpeg";
+import { Readable, Writable } from "stream";
 import { logger } from "../config/logger.js";
 
-// Map langue Whisper → config VoiceRSS
+// Pointer ffmpeg vers le binaire embarqué dans node_modules
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
 const VOICE_CONFIG = {
   french: { hl: "fr-fr", v: "Hortense" },
-  fr: { hl: "fr-fr", v: "Hortense" },
   english: { hl: "en-us", v: "Linda" },
-  en: { hl: "en-us", v: "Linda" },
-  mandinka: { hl: "fr-fr", v: "Hortense" }, // Fallback to French for Mandinka/Malinke
+  mandinka: { hl: "fr-fr", v: "Hortense" },
   default: { hl: "fr-fr", v: "Hortense" },
 };
 
 /**
- * Convertit un texte en buffer audio MP3 via VoiceRSS
- * Supporte français et anglais selon la langue détectée par Whisper
- * Clé gratuite : https://www.voicerss.org/registration.aspx (350 req/jour)
+ * Convertit un buffer MP3 en OGG Opus via fluent-ffmpeg
+ * WhatsApp PTT exige OGG Opus — MP3 direct ne fonctionne pas
+ * @param {Buffer} mp3Buffer
+ * @returns {Promise<Buffer>}
+ */
+function mp3ToOggOpus(mp3Buffer) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+
+    const input = new Readable();
+    input.push(mp3Buffer);
+    input.push(null);
+
+    const output = new Writable({
+      write(chunk, _, cb) {
+        chunks.push(chunk);
+        cb();
+      },
+      final(cb) {
+        resolve(Buffer.concat(chunks));
+        cb();
+      },
+    });
+
+    ffmpeg(input)
+      .inputFormat("mp3")
+      .audioCodec("libopus")
+      .audioBitrate("24k")
+      .audioFrequency(48000)
+      .audioChannels(1)
+      .format("ogg")
+      .on("error", (err) => {
+        logger.error({ err: err.message }, "[TTS] ffmpeg conversion failed");
+        reject(err);
+      })
+      .pipe(output);
+  });
+}
+
+/**
+ * Génère un audio OGG Opus depuis un texte via VoiceRSS
+ * Compatible WhatsApp PTT (push-to-talk)
  * @param {string} text
- * @param {string} language - langue Whisper ex: "french", "english"
+ * @param {string} language - "french" | "english"
  * @returns {Promise<Buffer|null>}
  */
 export async function textToSpeech(text, language = "french") {
@@ -32,27 +74,31 @@ export async function textToSpeech(text, language = "french") {
       key: apiKey,
       hl: config.hl,
       v: config.v,
-      src: text.slice(0, 500), // limite VoiceRSS
-      r: "0", // vitesse normale
+      src: text.slice(0, 500),
+      r: "0",
       c: "MP3",
       f: "16khz_16bit_mono",
     });
 
     const res = await fetch(`https://api.voicerss.org/?${params}`);
-    const buffer = Buffer.from(await res.arrayBuffer());
+    const mp3Buffer = Buffer.from(await res.arrayBuffer());
 
     // VoiceRSS retourne "ERROR: ..." en texte si la clé est invalide
-    const preview = buffer.slice(0, 6).toString();
-    if (preview.startsWith("ERROR")) {
-      logger.error({ err: buffer.toString() }, "[TTS] VoiceRSS API error");
+    if (mp3Buffer.slice(0, 6).toString().startsWith("ERROR")) {
+      logger.error({ err: mp3Buffer.toString() }, "[TTS] VoiceRSS API error");
       return null;
     }
 
     logger.info(
-      { size: buffer.length, language, voice: config.v },
-      "[TTS] Audio generated",
+      { size: mp3Buffer.length, language, voice: config.v },
+      "[TTS] MP3 generated",
     );
-    return buffer;
+
+    // Convertir MP3 → OGG Opus pour WhatsApp PTT
+    const oggBuffer = await mp3ToOggOpus(mp3Buffer);
+    logger.info({ size: oggBuffer.length }, "[TTS] Converted to OGG Opus ✓");
+
+    return oggBuffer;
   } catch (err) {
     logger.error({ err: err.message }, "[TTS] Failed");
     return null;

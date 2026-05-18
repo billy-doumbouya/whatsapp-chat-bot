@@ -35,7 +35,7 @@ export function buildPrompt(
   // Message actuel
   historyMessages.push({
     role: "user",
-    content: userMessage,
+     content: userMessage + "\n\n[Réponds obligatoirement dans la même langue que ce message]",
   });
 
   return { systemExtra, messages: historyMessages };

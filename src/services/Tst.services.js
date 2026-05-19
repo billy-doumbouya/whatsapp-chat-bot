@@ -1,134 +1,203 @@
+import Groq from "groq-sdk";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import ffmpeg from "fluent-ffmpeg";
-import { Readable, PassThrough } from "stream"; // FIXED: Swapped custom Writable for reliable PassThrough
+import { Readable, PassThrough } from "stream";
 import { logger } from "../config/logger.js";
 
-// Map fluent-ffmpeg to our node_modules embedded binary layout
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
-const VOICE_CONFIG = {
-  french: { hl: "fr-fr", v: "Pierre" }, // Standard native French Male
-  fr: { hl: "fr-fr", v: "Pierre" },
-  english: { hl: "en-us", v: "John" }, // Standard native US English Male
-  en: { hl: "en-us", v: "John" },
-  mandinka: { hl: "fr-fr", v: "Pierre" }, // Fallback to French Male profile
-  default: { hl: "fr-fr", v: "Pierre" },
-};
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
+});
 
 /**
- * Converts an MP3 Buffer into WhatsApp-native compliant OGG Opus using fluid stream bindings
- * @param {Buffer} mp3Buffer
- * @returns {Promise<Buffer>}
+ * Multilingual voice mapping
+ * You can change voices later if needed
  */
-function mp3ToOggOpus(mp3Buffer) {
+const VOICE_CONFIG = {
+  fr: "Celeste-PlayAI",
+  french: "Celeste-PlayAI",
+
+  en: "Atlas-PlayAI",
+  english: "Atlas-PlayAI",
+
+  default: "Celeste-PlayAI",
+};
+
+const TTS_MODEL = "playai-tts";
+
+/**
+ * Split long text safely for TTS APIs
+ * Avoids truncation and preserves sentence flow
+ */
+function splitText(text, maxLength = 3500) {
+  if (!text) return [];
+
+  const cleaned = text.replace(/\s+/g, " ").trim();
+
+  if (cleaned.length <= maxLength) {
+    return [cleaned];
+  }
+
+  const sentences = cleaned.match(/[^.!?]+[.!?]+/g) || [cleaned];
+
+  const chunks = [];
+  let current = "";
+
+  for (const sentence of sentences) {
+    if ((current + sentence).length > maxLength) {
+      chunks.push(current.trim());
+      current = "";
+    }
+
+    current += `${sentence} `;
+  }
+
+  if (current.trim()) {
+    chunks.push(current.trim());
+  }
+
+  return chunks;
+}
+
+/**
+ * Convert MP3 buffer → WhatsApp-native OGG Opus
+ */
+async function mp3ToOggOpus(mp3Buffer) {
   return new Promise((resolve, reject) => {
     const chunks = [];
 
-    // Initialize raw readable memory stream
-    const input = new Readable();
-    input.push(mp3Buffer);
-    input.push(null);
+    const input = new Readable({
+      read() {
+        this.push(mp3Buffer);
+        this.push(null);
+      },
+    });
 
-    // FIXED: Using a PassThrough stream ensures the lifecycle data layers resolve seamlessly on 'end'
     const output = new PassThrough();
 
-    output.on("data", (chunk) => chunks.push(chunk));
+    output.on("data", (chunk) => {
+      chunks.push(chunk);
+    });
 
-    // Core FFmpeg pipeline processing engine
+    output.on("end", () => {
+      resolve(Buffer.concat(chunks));
+    });
+
     ffmpeg(input)
       .inputFormat("mp3")
       .audioCodec("libopus")
-      .audioBitrate("24k")
-      .audioFrequency(48000)
+      .audioBitrate("32k")
       .audioChannels(1)
+      .audioFrequency(48000)
       .format("ogg")
+      .on("start", (cmd) => {
+        logger.debug({ cmd }, "[TTS] FFmpeg started");
+      })
       .on("error", (err) => {
-        logger.error(
-          { err: err.message },
-          "[TTS] ffmpeg processing operation failed",
-        );
+        logger.error({ err: err.message }, "[TTS] FFmpeg conversion failed");
         reject(err);
       })
       .on("end", () => {
-        // Safely consolidate individual stream chunks into a single audio buffer on close
-        resolve(Buffer.concat(chunks));
+        logger.debug("[TTS] FFmpeg conversion completed");
       })
-      .pipe(output);
+      .pipe(output, { end: true });
   });
 }
 
 /**
- * Generates an OGG Opus audio buffer from input text strings for WhatsApp PTT
+ * Generate high-quality WhatsApp-ready voice note
+ *
+ * Pipeline:
+ * Text
+ * → Groq PlayAI TTS (MP3)
+ * → FFmpeg conversion (OGG Opus)
+ * → Ready for WhatsApp PTT
+ *
  * @param {string} text
- * @param {string} language - Input language coming from the Whisper module
+ * @param {string} language
  * @returns {Promise<Buffer|null>}
  */
-export async function textToSpeech(text, language = "french") {
+export async function textToSpeech(text, language = "fr") {
   try {
-    const apiKey = process.env.VOICERSS_API_KEY;
-    if (!apiKey) {
-      logger.warn(
-        "[TTS] VOICERSS_API_KEY not set — skipping voice reply generation",
-      );
+    if (!text || !text.trim()) {
+      logger.warn("[TTS] Empty text received");
       return null;
     }
 
-    if (!text || text.trim() === "") {
-      logger.warn("[TTS] Aborted: Text payload input is empty");
-      return null;
-    }
-
-    // FIXED: Restored normalization to prevent case-sensitive mismatches with Whisper strings
     const normalizedLang = String(language).toLowerCase().trim();
-    const config = VOICE_CONFIG[normalizedLang] || VOICE_CONFIG.default;
 
-    const params = new URLSearchParams({
-      key: apiKey,
-      hl: config.hl,
-      v: config.v,
-      src: text.slice(0, 500), // Enforce strict VoiceRSS character limits
-      r: "0", // Playback speed rate configuration
-      c: "MP3",
-      f: "16khz_16bit_mono",
-    });
+    const voice = VOICE_CONFIG[normalizedLang] || VOICE_CONFIG.default;
 
-    const res = await fetch(`https://api.voicerss.org/?${params}`);
-
-    if (!res.ok) {
-      throw new Error(
-        `HTTP network error communication exception. Status: ${res.status}`,
-      );
-    }
-
-    const mp3Buffer = Buffer.from(await res.arrayBuffer());
-
-    // Validation Guard: Catch inline VoiceRSS explicit text error strings inside HTTP 200 states
-    if (mp3Buffer.slice(0, 6).toString().startsWith("ERROR")) {
-      logger.error(
-        { err: mp3Buffer.toString() },
-        "[TTS] VoiceRSS API upstream rejection token",
-      );
-      return null;
-    }
+    const chunks = splitText(text);
 
     logger.info(
-      { size: mp3Buffer.length, language: normalizedLang, voice: config.v },
-      "[TTS] MP3 audio payload generated",
+      {
+        chunks: chunks.length,
+        language: normalizedLang,
+        voice,
+      },
+      "[TTS] Starting synthesis",
     );
 
-    // Convert MP3 → OGG Opus for WhatsApp PTT compatibility
-    const oggBuffer = await mp3ToOggOpus(mp3Buffer);
+    const mp3Chunks = [];
+
+    /**
+     * Generate MP3 chunks from Groq TTS
+     */
+    for (const chunk of chunks) {
+      const response = await groq.audio.speech.create({
+        model: TTS_MODEL,
+        voice,
+        input: chunk,
+        response_format: "mp3",
+      });
+
+      const arrayBuffer = await response.arrayBuffer();
+
+      const mp3Buffer = Buffer.from(arrayBuffer);
+
+      if (!mp3Buffer || mp3Buffer.length === 0) {
+        throw new Error("Groq returned empty audio buffer");
+      }
+
+      mp3Chunks.push(mp3Buffer);
+    }
+
+    /**
+     * Merge all MP3 chunks
+     */
+    const mergedMp3 = Buffer.concat(mp3Chunks);
+
     logger.info(
-      { size: oggBuffer.length },
-      "[TTS] Converted to OGG Opus safely ✓",
+      {
+        size: mergedMp3.length,
+      },
+      "[TTS] MP3 synthesis completed",
     );
 
-    return oggBuffer;
+    /**
+     * Convert to WhatsApp-native OGG Opus
+     */
+    const oggOpusBuffer = await mp3ToOggOpus(mergedMp3);
+
+    logger.info(
+      {
+        size: oggOpusBuffer.length,
+      },
+      "[TTS] OGG Opus conversion completed",
+    );
+
+    return oggOpusBuffer;
   } catch (err) {
     logger.error(
-      { err: err.message, stack: err.stack },
-      "[TTS] Execution pipeline crashed",
+      {
+        err: err.message,
+        stack: err.stack,
+      },
+      "[TTS] Pipeline failed",
     );
+
     return null;
   }
 }

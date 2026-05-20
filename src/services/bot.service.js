@@ -6,7 +6,7 @@ import { buildPrompt } from "../helpers/prompt.builder.js";
 import { sendMessage, sendVoiceMessage } from "./whatsapp.client.js";
 import { isRateLimited } from "../middleware/rateLimiter.js";
 import { transcribeAudio } from "./transcription.service.js";
-import { textToSpeech } from "./Tst.services.js";
+import { textToSpeech } from "./tts.service.js";
 
 let paused = false;
 let voiceReplyEnabled = process.env.VOICE_REPLY === "true";

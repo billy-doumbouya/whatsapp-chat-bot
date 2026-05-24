@@ -1,13 +1,13 @@
 import { Conversation } from "../models/conversation.model.js";
 import { logger } from "../config/logger.js";
 
-// How many messages to pass to AI as context
-const CONTEXT_WINDOW = 10;
-// Max messages stored per conversation in DB
+// Nombre de messages à passer à l'IA comme contexte
+const CONTEXT_WINDOW = 15; // Aligné avec ton prompt builder pour un meilleur fil conducteur
+// Max messages stockés par conversation dans la DB
 const MAX_STORED_MESSAGES = 50;
 
 /**
- * Returns the last N messages for a given phone number
+ * Retourne les derniers N messages pour un numéro donné
  * @param {string} phone - WhatsApp JID
  * @returns {Promise<Array>}
  */
@@ -22,9 +22,8 @@ export async function getHistory(phone) {
 }
 
 /**
- * Saves a message (user or ai) to the conversation.
- * Uses $push + $slice to keep only the last MAX_STORED_MESSAGES in DB.
- * NOTE: $slice with $push requires the $each operator — this is intentional.
+ * Enregistre un message (user ou ai) dans la conversation.
+ * Évite les écritures miroirs identiques successives.
  * @param {string} phone
  * @param {"user"|"ai"} role
  * @param {string} content
@@ -32,6 +31,29 @@ export async function getHistory(phone) {
  */
 export async function saveMessage(phone, role, content, contactName = null) {
   try {
+    const cleanContent = content?.trim();
+    if (!cleanContent) return;
+
+    // PROTECTION ANTI-DOUBLON HISTORIQUE :
+    // On vérifie le tout dernier message en DB pour ce fil
+    const existingConvo = await Conversation.findOne(
+      { phone },
+      { messages: { $slice: -1 } },
+    ).lean();
+    const lastMessage = existingConvo?.messages?.[0];
+
+    if (
+      lastMessage &&
+      lastMessage.role === role &&
+      lastMessage.content === cleanContent
+    ) {
+      logger.debug(
+        { phone, role },
+        "[Memory] Message identique déjà présent à la fin de l'historique. Skip.",
+      );
+      return;
+    }
+
     const setFields = { lastMessageAt: new Date() };
     if (contactName) {
       setFields.contactName = contactName;
@@ -40,11 +62,9 @@ export async function saveMessage(phone, role, content, contactName = null) {
     await Conversation.findOneAndUpdate(
       { phone },
       {
-        // $each + $slice : ajoute le message ET tronque à -MAX_STORED_MESSAGES
-        // Le signe négatif garde les N derniers (les plus récents)
         $push: {
           messages: {
-            $each: [{ role, content, timestamp: new Date() }],
+            $each: [{ role, content: cleanContent, timestamp: new Date() }],
             $slice: -MAX_STORED_MESSAGES,
           },
         },
@@ -54,28 +74,46 @@ export async function saveMessage(phone, role, content, contactName = null) {
       { upsert: true, new: true },
     );
   } catch (err) {
-    logger.error({ err, phone, role }, "[Memory] Failed to save message");
+    logger.error(
+      { err: err.message, phone, role },
+      "[Memory] Failed to save message",
+    );
   }
 }
 
 /**
- * Delete conversation history for a contact
+ * Supprime l'historique des messages d'un contact
  * @param {string} phone
  */
 export async function clearHistory(phone) {
-  await Conversation.findOneAndUpdate(
-    { phone },
-    { $set: { messages: [], totalMessages: 0 } },
-  );
-  logger.info({ phone }, "[Memory] History cleared");
+  try {
+    await Conversation.findOneAndUpdate(
+      { phone },
+      { $set: { messages: [], totalMessages: 0 } },
+    );
+    logger.info({ phone }, "[Memory] History cleared");
+  } catch (err) {
+    logger.error(
+      { err: err.message, phone },
+      "[Memory] Failed to clear history",
+    );
+  }
 }
 
 /**
- * Returns all conversations summary (for API)
+ * Retourne le résumé de toutes les conversations (pour ton Dashboard API)
  */
 export async function getAllConversations() {
-  return Conversation.find()
-    .select("phone contactName totalMessages lastMessageAt")
-    .sort({ lastMessageAt: -1 })
-    .lean();
+  try {
+    return await Conversation.find()
+      .select("phone contactName totalMessages lastMessageAt")
+      .sort({ lastMessageAt: -1 })
+      .lean();
+  } catch (err) {
+    logger.error(
+      { err: err.message },
+      "[Memory] Failed to get all conversations",
+    );
+    return [];
+  }
 }

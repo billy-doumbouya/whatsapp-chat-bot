@@ -12,35 +12,46 @@ const groq = new Groq({
 
 /**
  * Multilingual voice mapping
- * You can change voices later if needed
  */
 const VOICE_CONFIG = {
   fr: "Celeste-PlayAI",
   french: "Celeste-PlayAI",
-
   en: "Atlas-PlayAI",
   english: "Atlas-PlayAI",
-
   default: "Celeste-PlayAI",
 };
 
 const TTS_MODEL = "playai-tts";
 
 /**
+ * Supprime le Markdown et les caractères spéciaux que l'IA écrit
+ * mais que la synthèse vocale ne doit pas prononcer.
+ */
+function cleanTextForTTS(text) {
+  if (!text) return "";
+  return text
+    .replace(/\*\*/g, "") // Supprime les gras **
+    .replace(/\*/g, "") // Supprime les italiques *
+    .replace(/`/g, "") // Supprime les backticks code
+    .replace(/[-•♦]/g, ",") // Remplace les puces de listes par des virgules pour marquer une pause naturelle
+    .replace(/\s+/g, " ") // Normalise les espaces
+    .trim();
+}
+
+/**
  * Split long text safely for TTS APIs
  * Avoids truncation and preserves sentence flow
  */
-function splitText(text, maxLength = 3500) {
+function splitText(text, maxLength = 3000) {
   if (!text) return [];
 
-  const cleaned = text.replace(/\s+/g, " ").trim();
+  const cleaned = cleanTextForTTS(text);
 
   if (cleaned.length <= maxLength) {
     return [cleaned];
   }
 
   const sentences = cleaned.match(/[^.!?]+[.!?]+/g) || [cleaned];
-
   const chunks = [];
   let current = "";
 
@@ -49,7 +60,6 @@ function splitText(text, maxLength = 3500) {
       chunks.push(current.trim());
       current = "";
     }
-
     current += `${sentence} `;
   }
 
@@ -61,7 +71,7 @@ function splitText(text, maxLength = 3500) {
 }
 
 /**
- * Convert MP3 buffer → WhatsApp-native OGG Opus
+ * Convert multiple MP3 buffers joined into a single coherent WhatsApp-native OGG Opus
  */
 async function mp3ToOggOpus(mp3Buffer) {
   return new Promise((resolve, reject) => {
@@ -86,6 +96,7 @@ async function mp3ToOggOpus(mp3Buffer) {
 
     ffmpeg(input)
       .inputFormat("mp3")
+      // Utilisation du filtre d'encodage universellement accepté par l'application mobile WhatsApp
       .audioCodec("libopus")
       .audioBitrate("32k")
       .audioChannels(1)
@@ -109,10 +120,7 @@ async function mp3ToOggOpus(mp3Buffer) {
  * Generate high-quality WhatsApp-ready voice note
  *
  * Pipeline:
- * Text
- * → Groq PlayAI TTS (MP3)
- * → FFmpeg conversion (OGG Opus)
- * → Ready for WhatsApp PTT
+ * Text -> Clean Markdown -> Groq PlayAI TTS (MP3 Chunks) -> Merged Buffers -> FFmpeg (OGG Opus)
  *
  * @param {string} text
  * @param {string} language
@@ -126,9 +134,9 @@ export async function textToSpeech(text, language = "fr") {
     }
 
     const normalizedLang = String(language).toLowerCase().trim();
-
     const voice = VOICE_CONFIG[normalizedLang] || VOICE_CONFIG.default;
 
+    // Découpe après nettoyage automatique du texte
     const chunks = splitText(text);
 
     logger.info(
@@ -154,7 +162,6 @@ export async function textToSpeech(text, language = "fr") {
       });
 
       const arrayBuffer = await response.arrayBuffer();
-
       const mp3Buffer = Buffer.from(arrayBuffer);
 
       if (!mp3Buffer || mp3Buffer.length === 0) {
@@ -165,7 +172,7 @@ export async function textToSpeech(text, language = "fr") {
     }
 
     /**
-     * Merge all MP3 chunks
+     * Merge all MP3 chunks safely
      */
     const mergedMp3 = Buffer.concat(mp3Chunks);
 

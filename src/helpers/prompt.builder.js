@@ -1,15 +1,35 @@
 import { env } from "../config/env.js";
+import { Bio } from "../data/bio.js";
 
 const CONTEXT_WINDOW = 10;
 
 /**
- * Builds the messages array sent to the AI (OpenAI format)
- * @param {Array} history
- * @param {string} userMessage
- * @param {boolean} isWife
- * @param {string|null} contactName
- * @param {string} detectedLanguage - langue détectée par Whisper ex: "french", "english"
- * @returns {{ systemExtra: string, messages: Array }}
+ * Normalise la langue reçue de Whisper ou de l'analyse textuelle
+ * @param {string|null} lang
+ * @returns {"anglais"|"français"|"malinké"}
+ */
+function normalizeLanguage(lang) {
+  if (!lang) return null;
+  const lower = lang.toLowerCase().trim();
+  if (lower.startsWith("en") || lower.includes("english")) return "anglais";
+  if (
+    lower.includes("malinke") ||
+    lower.includes("maninka") ||
+    lower.includes("bambara")
+  )
+    return "malinké";
+  return "français";
+}
+
+/**
+ * Construit le tableau de messages final destiné à l'API LLM (Gemini/OpenAI)
+ *
+ * @param {Array} history - L'historique extrait de la base MongoDB
+ * @param {string} userMessage - Le dernier message reçu (ou la transcription Whisper)
+ * @param {boolean} isWife - Flag indiquant si l'interlocuteur est Sara
+ * @param {string|null} contactName - Le nom enregistré du contact WhatsApp
+ * @param {string|null} detectedLanguage - La langue détectée par le service de transcription
+ * @returns {Array} Payload de messages prêt pour l'envoi
  */
 export function buildPrompt(
   history,
@@ -18,29 +38,50 @@ export function buildPrompt(
   contactName = null,
   detectedLanguage = null,
 ) {
-  let systemExtra = "";
+  // 1. Initialisation du prompt système avec ta Bio officielle
+  let dynamicSystemInstructions = Bio;
 
+  // 2. Ajout des couches de contexte prioritaires au prompt système
   if (isWife) {
-    systemExtra = `\nATTENTION : Ce message vient de ta femme ${env.bot.wifeName}. Réponds de façon tendre et affectueuse. Tu peux l'appeler "chérie", "Sara", "mon amour" selon le contexte.`;
+    dynamicSystemInstructions += `\n\n---
+# CRITICAL WIFE CONTEXT
+Ce message vient de ta femme Sara (${env.bot.wifeName}). Applique immédiatement les règles affectueuses du persona. Tu dois l'appeler "chérie", "mon amour" ou "Sara". Ne sois jamais distant ou formel avec elle.`;
   } else if (contactName) {
-    systemExtra = `\nLa personne qui t'écrit s'appelle ${contactName}.`;
+    dynamicSystemInstructions += `\n\n---
+# CURRENT CONTACT CONTEXT
+La personne qui t'écrit actuellement s'appelle : ${contactName}. Utilise son prénom si la situation s'y prête conformément aux règles de style du persona.`;
   }
 
-  // Historique structuré
+  const finalMessages = [
+    {
+      role: "system",
+      content: dynamicSystemInstructions,
+    },
+  ];
+
+  // 3. Traitement et injection de l'historique récent (Respect de la CONTEXT_WINDOW)
   const historyMessages = history.slice(-CONTEXT_WINDOW).map((msg) => ({
     role: msg.role === "ai" ? "assistant" : "user",
     content: msg.content,
   }));
 
-  // Instruction langue collée au message — Gemini ne peut pas l'ignorer
-  const langInstruction = detectedLanguage
-    ? `\n\n[Réponds obligatoirement en ${detectedLanguage === "english" ? "anglais" : "français"}]`
-    : "\n\n[Réponds obligatoirement dans la même langue que ce message]";
+  finalMessages.push(...historyMessages);
 
-  historyMessages.push({
+  // 4. Détermination de la consigne de langue stricte
+  const targetLang = normalizeLanguage(detectedLanguage);
+  let langInstruction = "";
+
+  if (targetLang) {
+    langInstruction = `\n\n[Instruction invisible pour l'IA : Réponds obligatoirement et entièrement en langue ${targetLang}]`;
+  } else {
+    langInstruction = `\n\n[Instruction invisible pour l'IA : Applique la règle "DETECTION AUTOMATIQUE DE LA LANGUE" définie dans ton style de communication]`;
+  }
+
+  // 5. Ajout du message utilisateur courant avec sa directive linguistique sécurisée
+  finalMessages.push({
     role: "user",
     content: userMessage + langInstruction,
   });
 
-  return { systemExtra, messages: historyMessages };
+  return finalMessages;
 }

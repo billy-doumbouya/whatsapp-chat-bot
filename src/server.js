@@ -4,37 +4,49 @@ import { logger } from "./config/logger.js";
 import { connectDB } from "./config/db.js";
 import app from "./app.js";
 import { startWhatsApp } from "./services/whatsapp.client.js";
-import { handleIncomingMessage } from "./services/bot.service.js";
+import { handleIncomingMessage, onHumanReply } from "./services/bot.service.js"; // Importation des deux capteurs
 
 async function bootstrap() {
   logger.info("[Boot] Starting WhatsApp AI Bot...");
 
-  // 1. Connect to MongoDB
+  // 1. Connexion à la base MongoDB
   await connectDB();
 
-  // 2. Start Express server
+  // 2. Démarrage de l'API Express (Dashboard / Webhooks)
   app.listen(env.port, () => {
-    logger.info(`[Boot] API listening on http://localhost:${env.port}`);
+    logger.info(`[Boot] API listening on URL: ${env.app_url}`);
   });
 
-  // 3. Start WhatsApp bot
-  await startWhatsApp(handleIncomingMessage);
+  // 3. Initialisation du client WhatsApp avec les deux flux de capture
+  // handleIncomingMessage : Écoute les autres
+  // onHumanReply : T'écoute toi (Billy) pour couper l'IA si tu prends la main
+  await startWhatsApp({
+    onIncomingMessage: handleIncomingMessage,
+    onHumanReply: onHumanReply,
+  });
 
-  logger.info("[Boot] Bot ready ✓");
+  logger.info("[Boot] Bot execution loop successfully initialized ✓");
 }
 
-// Graceful shutdown
+// Graceful shutdown - Fermeture propre des connexions
 process.on("SIGINT", () => {
-  logger.info("[Boot] Shutting down...");
+  logger.info("[Boot] Shutting down application gracefully...");
   process.exit(0);
 });
 
-process.on("unhandledRejection", (reason) => {
-  logger.error({ reason }, "[Boot] Unhandled Promise Rejection");
+// Sécurités globales contre les crashs asynchrones de Node.js
+process.on("unhandledRejection", (reason, promise) => {
+  logger.error(
+    { reason, promise },
+    "[Boot] Critical Unhandled Promise Rejection detected",
+  );
 });
 
 process.on("uncaughtException", (err) => {
-  logger.error({ err }, "[Boot] Uncaught Exception");
+  logger.error(
+    { err: err.message, stack: err.stack },
+    "[Boot] Critical Uncaught Exception thrown",
+  );
   process.exit(1);
 });
 

@@ -9,24 +9,30 @@ import { transcribeAudio } from "./transcription.service.js";
 import { textToSpeech } from "./tts.service.js";
 
 let paused = false;
-let voiceReplyEnabled = process.env.VOICE_REPLY === "true";
 
-// Messages de clôture — pas de réponse nécessaire
-const CLOSING_PATTERNS = [
-  /^(ok|okay)\.?$/i,
-  /^(merci|thanks|thank you|thx)\.?$/i,
-  /^(d'accord|dac|ok dac)\.?$/i,
-  /^(bonne journée|bonne nuit|bonsoir)\.?$/i,
-  /^(bye|au revoir|à bientôt|ciao)\.?$/i,
-  /^(👍|🙏|✅|😊|🤝)+$/,
-  /^(c'est bon|c est bon|nickel|parfait|super)\.?$/i,
-];
-
-function isClosingMessage(text) {
-  if (!text) return false;
-  return CLOSING_PATTERNS.some((p) => p.test(text.trim()));
+/**
+ * Fonction appelée AUTOMATIQUEMENT par whatsapp.client.js
+ * lorsque TU réponds manuellement depuis ton téléphone.
+ */
+export async function onHumanReply(jid, textContent) {
+  try {
+    logger.info(
+      { jid, textContent: textContent.slice(0, 40) },
+      "[Pipeline] Enregistrement de la réponse manuelle de Billy.",
+    );
+    // Sauvegarde ton propre message dans la base Mongo pour que l'IA connaisse le contexte au prochain message
+    await saveMessage(jid, "ai", textContent);
+  } catch (err) {
+    logger.error(
+      { err: err.message, jid },
+      "[Pipeline] Échec de l'enregistrement de la réponse humaine",
+    );
+  }
 }
 
+/**
+ * Gestionnaire principal des messages ENTRANTS (Amis / Collaborateurs)
+ */
 export async function handleIncomingMessage(
   sock,
   jid,
@@ -36,7 +42,7 @@ export async function handleIncomingMessage(
   audioBuffer,
   audioMime,
 ) {
-  console.log("=== MESSAGE RECU ===", {
+  console.log("=== MESSAGE TRAITÉ PAR L'IA ===", {
     jid,
     text: text?.slice(0, 50),
     hasAudio: !!audioBuffer,
@@ -45,58 +51,44 @@ export async function handleIncomingMessage(
   // 1. Ignorer les groupes
   if (jid.endsWith("@g.us") && !env.bot.replyGroups) return;
 
-  // 2. Commandes owner
+  // 2. Commandes owner (Billy contrôle son instance)
   const isOwner = !!(env.bot.ownerJid && jid === env.bot.ownerJid);
-
-  if (text?.startsWith("!")) {
-    logger.info(
-      {
-        jid,
-        ownerJid: env.bot.ownerJid ?? "NON DÉFINI",
-        isOwner,
-        cmd: text.trim(),
-      },
-      "[Bot] Commande reçue",
-    );
-  }
-
-  if (isOwner) {
+  if (isOwner && text?.startsWith("!")) {
     const handled = await handleOwnerCommand(jid, text);
     if (handled) return;
   }
 
-  // 3. Pause
+  // 3. État Pause Global
   if (paused) {
-    logger.debug({ jid }, "[Bot] Paused — message ignored");
+    logger.debug({ jid }, "[Bot] Pause globale active — message ignoré");
     return;
   }
 
-  // 4. Rate limit
+  // 4. Rate limit pour éviter le spam ou les boucles infinies
   if (isRateLimited(jid)) return;
 
-  // 5. Commandes publiques
+  // 5. Commandes publiques (!reset)
   if (await handlePublicCommand(jid, text)) return;
 
-  // 6. Contact spécial
   const isWife = !!(env.bot.wifeJid && jid === env.bot.wifeJid);
-
-  // 7. Transcription vocal
   const wasVoiceMessage = !!audioBuffer;
   let finalText = text;
-  let detectedLanguage = "french"; // défaut
+  let detectedLanguage = "french";
 
-  if (audioBuffer) {
-    logger.info({ jid }, "[Bot] Transcribing audio...");
+  // 6. Pipeline de transcription si Vocal entrant
+  if (wasVoiceMessage) {
+    logger.info({ jid }, "[Bot] Transcription du vocal entrant...");
     const result = await transcribeAudio(audioBuffer, audioMime);
 
     if (result?.text) {
-      finalText = `[Vocal] ${result.text}`;
+      finalText = result.text; // Extraction du texte brut pur
       detectedLanguage = result.language || "french";
       logger.info(
         { jid, language: detectedLanguage, text: result.text },
-        "[Bot] Audio transcribed",
+        "[Bot] Vocal transcrit avec succès",
       );
     } else {
+      // Échec de transcription : réponse neutre sécurisée textuelle
       await sendMessage(
         jid,
         "Reçu, je regarde ça dès que je peux 👍",
@@ -106,53 +98,99 @@ export async function handleIncomingMessage(
     }
   }
 
-  if (!finalText) return;
-
-  // 8. Ignorer messages de clôture (texte uniquement, pas les vocaux)
-  if (!wasVoiceMessage && isClosingMessage(finalText)) {
-    logger.debug({ jid, finalText }, "[Bot] Closing message — no reply");
-    return;
-  }
+  if (!finalText || finalText.trim() === "") return;
 
   try {
-    await saveMessage(jid, "user", finalText, contactName);
+    // Enregistrement du message entrant dans l'historique Mongo
+    const formattedUserMsg = wasVoiceMessage
+      ? `[Vocal] ${finalText}`
+      : finalText;
+    await saveMessage(jid, "user", formattedUserMsg, contactName);
+
+    // Récupération de l'historique fraîchement mis à jour
     const history = await getHistory(jid);
-    const prompt = buildPrompt(
-      history,
-      finalText,
+
+    // Nettoyage de l'historique pour éviter que l'IA ne reproduise les marqueurs "[Vocal]" dans ses réponses
+    const cleanHistory = history.map((msg) => ({
+      ...msg,
+      content: msg.content.replace(/^\[Vocal\]\s*/i, ""),
+    }));
+
+    // Construction du prompt structuré avec le payload propre
+    const promptPayload = buildPrompt(
+      cleanHistory,
+      finalText.replace(/^\[Vocal\]\s*/i, ""),
       isWife,
       contactName,
       detectedLanguage,
     );
 
     logger.debug(
-      { jid, isWife, historyLength: history.length },
-      "[Bot] Sending to AI",
+      { jid, historyLength: cleanHistory.length },
+      "[Bot] Envoi au LLM Gemini...",
     );
 
-    const reply = await askGemini(prompt);
-    await saveMessage(jid, "ai", reply);
+    // Appel de l'IA (Retourne l'objet JSON standardisé)
+    const aiResponse = await askGemini(promptPayload);
 
-    // 9. Répondre en vocal si message vocal reçu
+    // GESTION DU SILENCE OU DU TRANSFERT À L'HUMAIN
+    if (aiResponse.requires_human_intervention) {
+      logger.info(
+        { jid },
+        "[Bot] Intervention humaine requise. Alerte envoyée à l'owner.",
+      );
+
+      // Optionnel mais hautement recommandé : Alerter Billy si quelqu'un a besoin d'une vraie réponse humaine
+      if (env.bot.ownerJid && jid !== env.bot.ownerJid) {
+        await sendMessage(
+          env.bot.ownerJid,
+          `⚠️ *Intervention requise* avec *${contactName || jid}*\nLe bot a passé la main sur le dernier message.`,
+        );
+      }
+      return;
+    }
+
+    if (!aiResponse.should_reply) {
+      logger.info(
+        { jid },
+        "[Bot] L'IA a décidé que ce message ne nécessitait pas de réponse.",
+      );
+      return;
+    }
+
+    const cleanReplyText = aiResponse.reply_content;
+
+    // Sauvegarde immédiate de la réponse générée en BDD avant l'envoi WhatsApp
+    await saveMessage(jid, "ai", cleanReplyText);
+
+    // 7. Pipeline de Sortie : Traitement de la réponse Vocale
     if (wasVoiceMessage) {
       logger.info(
         { jid, language: detectedLanguage },
-        "[Bot] Generating voice reply...",
+        "[Bot] Génération du Text-to-Speech...",
       );
-      const audioReply = await textToSpeech(reply, detectedLanguage);
+
+      const audioReply = await textToSpeech(cleanReplyText, detectedLanguage);
+
       if (audioReply) {
         await sendVoiceMessage(jid, audioReply, env.bot.typingDelayMs);
-        logger.info({ jid }, "[Bot] Voice reply sent ✓");
+        logger.info({ jid }, "[Bot] Réponse vocale envoyée ✓");
         return;
       }
-      // TTS échoué — fallback texte
-      logger.warn({ jid }, "[Bot] TTS failed — falling back to text");
+      logger.warn(
+        { jid },
+        "[Bot] Échec du TTS — Fallback automatique sur le format texte",
+      );
     }
 
-    await sendMessage(jid, reply, env.bot.typingDelayMs);
-    logger.info({ jid, contactName, isWife }, "[Bot] Reply sent ✓");
+    // Réponse Textuelle classique
+    await sendMessage(jid, cleanReplyText, env.bot.typingDelayMs);
+    logger.info({ jid, contactName }, "[Bot] Réponse textuelle envoyée ✓");
   } catch (err) {
-    logger.error({ err, jid }, "[Bot] Failed to handle message");
+    logger.error(
+      { err: err.message, jid },
+      "[Bot] Échec critique du traitement du message",
+    );
   }
 }
 
@@ -164,54 +202,45 @@ async function handleOwnerCommand(jid, text) {
     paused = true;
     await sendMessage(
       jid,
-      "⏸ Bot en pause. Je prends la main.\nEnvoie !resume pour réactiver.",
+      "⏸ Bot en pause globale. Je prends la main.\nEnvoie !resume pour réactiver.",
     );
-    logger.info("[Bot] Bot mis en pause par owner");
     return true;
   }
-
   if (cmd === "!resume") {
     paused = false;
-    await sendMessage(jid, "▶️ Bot réactivé.");
-    logger.info("[Bot] Bot réactivé par owner");
+    await sendMessage(jid, "▶️ Bot réactivé globalement.");
     return true;
   }
-
   if (cmd === "!status") {
     const uptimeMin = Math.floor(process.uptime() / 60);
     await sendMessage(
       jid,
       [
-        `État : ${paused ? "⏸ en pause" : "▶️ actif"}`,
+        `État Global : ${paused ? "⏸ en pause" : "▶️ actif"}`,
         `Uptime : ${uptimeMin} min`,
-        `Réponse vocale auto : ✅ activée sur vocaux reçus`,
         `Owner JID : ${env.bot.ownerJid ?? "non défini"}`,
       ].join("\n"),
     );
     return true;
   }
 
-  // Pause temporaire : !pause 30
   const pauseMatch = cmd.match(/^!pause (\d+)$/);
   if (pauseMatch) {
     const minutes = parseInt(pauseMatch[1], 10);
     paused = true;
-    await sendMessage(
-      jid,
-      `⏸ Bot en pause pendant ${minutes} min. Reprise automatique ensuite.`,
-    );
-    logger.info({ minutes }, "[Bot] Pause temporaire activée");
+    await sendMessage(jid, `⏸ Bot en pause globale pendant ${minutes} min.`);
     setTimeout(
       () => {
         paused = false;
-        logger.info("[Bot] Pause temporaire terminée — bot réactivé");
-        sendMessage(jid, "▶️ Pause terminée, bot réactivé automatiquement.");
+        sendMessage(
+          jid,
+          "▶️ Pause automatique terminée, bot réactivé globalement.",
+        );
       },
       minutes * 60 * 1000,
     );
     return true;
   }
-
   return false;
 }
 

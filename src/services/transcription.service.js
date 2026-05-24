@@ -4,6 +4,25 @@ import { logger } from "../config/logger.js";
 
 const groq = new Groq({ apiKey: env.groqApiKey });
 
+// Liste des hallucinations fréquentes générées par Whisper sur des blancs ou bruits de fond
+const WHISPER_HALLUCINATIONS = [
+  /thank you for watching/i,
+  /sous-titres/i,
+  /traduction de/i,
+  /rejoignez-nous/i,
+  /merci d'avoir regardé/i,
+];
+
+/**
+ * Filtre les phrases générées par erreur par Whisper sur les bruits de fond
+ */
+function isWhisperHallucination(text) {
+  if (!text) return true;
+  // Si le texte fait moins de 2 caractères ou correspond à un pattern d'hallucination connu
+  if (text.length < 2) return true;
+  return WHISPER_HALLUCINATIONS.some((pattern) => pattern.test(text));
+}
+
 /**
  * Maps standard mime-types to their respective file extensions for Groq payload safety
  * @param {string} mimeType
@@ -51,9 +70,19 @@ export async function transcribeAudio(audioBuffer, mimeType = "audio/ogg") {
     const text = transcription.text?.trim() || null;
     const language = transcription.language || "french";
 
-    if (!text) return null;
+    // Sécurité Anti-Hallucination : Si Whisper a inventé du texte sur du bruit, on coupe court
+    if (!text || isWhisperHallucination(text)) {
+      logger.warn(
+        { rawText: text },
+        "[Transcription] Texte ignoré car identifié comme hallucination ou trop court.",
+      );
+      return null;
+    }
 
-    logger.info({ language }, "[Transcription] Audio transcribed successfully");
+    logger.info(
+      { language, textLength: text.length },
+      "[Transcription] Audio transcribed successfully",
+    );
     return { text, language };
   } catch (err) {
     logger.error(

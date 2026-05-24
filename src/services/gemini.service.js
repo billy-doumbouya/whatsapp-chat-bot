@@ -4,88 +4,126 @@ import { logger } from "../config/logger.js";
 
 const OPEN_ROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_RETRIES = 2;
-const FALLBACK_REPLIES = [
-  "Je reviens vers toi dans un moment 🙏",
-  "Pas dispo là, je te rappelle bientôt.",
-  "Reçu ! Je te réponds dès que possible.",
-];
 
-function getRandomFallback() {
-  return FALLBACK_REPLIES[Math.floor(Math.random() * FALLBACK_REPLIES.length)];
-}
+// Fallback structuré sécurisé si l'API OpenRouter est totalement hors-ligne
+const FALLBACK_JSON_REPLY = {
+  should_reply: true,
+  requires_human_intervention: false,
+  reply_content: "Je regarde ça dès que je me pose 🙏",
+};
 
 /**
- * Sends a structured prompt request to Gemini via OpenRouter with transient failure fallback
- * @param {{ systemExtra: string, messages: Array }} prompt
- * @param {number} attempt
- * @returns {Promise<string>}
+ * Envoie un payload de messages prêt à l'emploi à Gemini via OpenRouter et garantit un retour JSON.
+ * @param {Array<{role: string, content: string}>} messagesPayload - Tableau de messages généré par le Prompt Builder
+ * @param {number} attempt - Index de la tentative actuelle (gestion du backoff)
+ * @returns {Promise<{ should_reply: boolean, requires_human_intervention: boolean, reply_content: string }>}
  */
-export async function askGemini({ systemExtra, messages }, attempt = 0) {
+export async function askGemini(messagesPayload, attempt = 0) {
   try {
-    // Isolated Array Structuring: Prevents reference mutation leaks across execution contexts
-    const payloadMessages = [
-      {
-        role: "system",
-        content: `${env.bot.persona || ""}${systemExtra || ""}`,
-      },
-      ...messages,
-    ];
+    if (
+      !messagesPayload ||
+      !Array.isArray(messagesPayload) ||
+      messagesPayload.length === 0
+    ) {
+      throw new Error(
+        "Le payload de messages fourni au service Gemini est vide ou invalide",
+      );
+    }
+
+    // Copie locale pour ne pas muter le payload d'origine par référence
+    const finalMessages = [...messagesPayload];
+
+    // On extrait le premier message (le bloc système complet) pour y greffer la contrainte stricte du JSON
+    if (finalMessages[0] && finalMessages[0].role === "system") {
+      finalMessages[0].content += `\n\n---
+# TECHNICAL OUTPUT FORMAT constraint
+Tu dois impérativement répondre sous la forme d'un objet JSON valide. Ne saute pas de ligne avant le JSON, n'ajoute pas de balises markdown \`\`\`json. Ton JSON doit respecter scrupuleusement cette structure :
+{
+  "should_reply": true ou false (met false si le message reçu n'appelle aucune action, réponse ou est une simple confirmation de fin de discussion),
+  "requires_human_intervention": true ou false (met true si le sujet requiert une action manuelle de ta part ou si c'est trop sensible/confidentiel),
+  "reply_content": "Le texte de ta réponse ici en te basant sur ton identité de Billy (laisse vide "" si should_reply est false ou requires_human_intervention est true)"
+}`;
+    }
 
     const response = await axios.post(
       OPEN_ROUTER_URL,
       {
         model: env.gemini.model,
-        messages: payloadMessages,
-        temperature: 0.85,
-        max_tokens: 300,
+        messages: finalMessages,
+        // Une température basse supprime les caprices de formatage et les hallucinations sur le JSON
+        temperature: 0.3,
+        max_tokens: 500,
+        // FORCE OPENROUTER / GEMINI A RENVOYER DU JSON
+        response_format: { type: "json_object" },
       },
       {
         headers: {
           Authorization: `Bearer ${env.gemini.apiKey}`,
           "Content-Type": "application/json",
-          // OPTIMIZATION: Required OpenRouter analytics and tracking parameters
           "HTTP-Referer": "https://github.com",
           "X-Title": "WhatsApp AI Core Engine",
         },
-        timeout: 30000, // 30 second global request gatekeeper
+        timeout: 30000, // 30 secondes maximum avant timeout
       },
     );
 
-    const text = response.data?.choices?.[0]?.message?.content;
-    if (!text) {
-      throw new Error("Empty response structure received from remote endpoint");
+    const rawContent = response.data?.choices?.[0]?.message?.content;
+    if (!rawContent) {
+      throw new Error("Structure de réponse vide reçue du endpoint OpenRouter");
     }
 
-    return text.trim();
+    // Extraction et Parsing sécurisé du JSON renvoyé par Gemini
+    try {
+      const parsedJson = JSON.parse(rawContent.trim());
+
+      return {
+        should_reply: parsedJson.should_reply ?? true,
+        requires_human_intervention:
+          parsedJson.requires_human_intervention ?? false,
+        reply_content: parsedJson.reply_content || "",
+      };
+    } catch (parseError) {
+      logger.error(
+        { parseError: parseError.message, rawContent },
+        "[OpenRouter] Échec du parsing JSON du contenu généré",
+      );
+      // Si l'IA a généré un JSON invalide, on passe la main à l'humain par sécurité pour éviter d'envoyer du texte brut corrompu
+      return {
+        should_reply: false,
+        requires_human_intervention: true,
+        reply_content: "",
+      };
+    }
   } catch (err) {
     const status = err.response?.status;
     const detail = err.response?.data?.error?.message || err.message;
 
-    logger.error({ status, detail, attempt }, "[OpenRouter] Request failed");
+    logger.error(
+      { status, detail, attempt },
+      "[OpenRouter] La requête a échoué",
+    );
 
-    // OPTIMIZATION: Fail-fast architecture. Immediately halt retries on authentication or client payload bugs
     const isClientError =
       status && status >= 400 && status < 500 && status !== 429;
 
     if (isClientError) {
       logger.error(
-        "[OpenRouter] Fatal configuration or authentication payload error. Skipping retries.",
+        "[OpenRouter] Erreur fatale de configuration ou de payload (4xx). Annulation des tentatives.",
       );
-      return getRandomFallback();
+      return FALLBACK_JSON_REPLY;
     }
 
-    // Process Retry Queue for transient errors (Network dropouts, 429 Rate Limits, 5xx server issues)
+    // Gestion du Backoff linéaire pour les codes 429 ou 5xx (erreurs serveurs temporaires)
     if (attempt < MAX_RETRIES) {
-      const backoffTime = 1000 * (attempt + 1);
+      const backoffTime = 1500 * (attempt + 1);
       logger.info(
-        `[OpenRouter] Retrying connection loop in ${backoffTime}ms (Attempt ${attempt + 1}/${MAX_RETRIES})...`,
+        `[OpenRouter] Nouvelle tentative dans ${backoffTime}ms (Attempt ${attempt + 1}/${MAX_RETRIES})...`,
       );
 
       await new Promise((r) => setTimeout(r, backoffTime));
-      return askGemini({ systemExtra, messages }, attempt + 1);
+      return askGemini(messagesPayload, attempt + 1);
     }
 
-    // Default Fallback
-    return getRandomFallback();
+    return FALLBACK_JSON_REPLY;
   }
 }

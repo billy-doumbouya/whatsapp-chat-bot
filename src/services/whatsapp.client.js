@@ -39,7 +39,7 @@ export function getConnectionStatus() {
 /**
  * Démarre le client WhatsApp
  */
-export async function startWhatsApp(onMessage) {
+export async function startWhatsApp({ onIncomingMessage, onHumanReply }) {
   const { state, saveCreds } = await useMongoAuthState();
   const { version } = await fetchLatestBaileysVersion();
 
@@ -88,7 +88,7 @@ export async function startWhatsApp(onMessage) {
       if (shouldReconnect) {
         logger.info("[WA] Reconnecting in 3 seconds...");
         setTimeout(() => {
-          startWhatsApp(onMessage);
+          startWhatsApp({ onIncomingMessage, onHumanReply });
         }, 3000);
       } else {
         logger.error("[WA] Logged out permanently");
@@ -105,7 +105,7 @@ export async function startWhatsApp(onMessage) {
 
     for (const msg of messages) {
       try {
-        await handleRawMessage(sock, msg, onMessage);
+        await handleRawMessage(sock, msg, onIncomingMessage);
       } catch (err) {
         logger.error(
           { err: err.message, stack: err.stack },
@@ -121,7 +121,7 @@ export async function startWhatsApp(onMessage) {
 /**
  * Processeur central des messages bruts WhatsApp
  */
-async function handleRawMessage(sock, msg, onMessage) {
+async function handleRawMessage(sock, msg, onIncomingMessage) {
   if (!msg.message) return;
 
   const jid = msg.key.remoteJid;
@@ -208,7 +208,7 @@ async function handleRawMessage(sock, msg, onMessage) {
       const mime = audioMessage?.mimetype || "audio/ogg";
 
       // Transmission au pipeline d'orchestration de l'IA
-      await onMessage(
+      await onIncomingMessage(
         sock,
         jid,
         null,
@@ -241,7 +241,7 @@ async function handleRawMessage(sock, msg, onMessage) {
   /**
    * Envoi du texte propre au pipeline d'orchestration de l'IA
    */
-  await onMessage(
+  await onIncomingMessage(
     sock,
     jid,
     text.trim(),

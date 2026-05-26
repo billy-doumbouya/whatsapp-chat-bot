@@ -1,18 +1,15 @@
 import Groq from "groq-sdk";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import ffmpeg from "fluent-ffmpeg";
-import { Readable, PassThrough } from "stream";
+import { Readable } from "stream";
+import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
+// FIX Bug 8: cohérence — env.groqApiKey partout
+const groq = new Groq({ apiKey: env.groqApiKey });
 
-/**
- * Multilingual voice mapping
- */
 const VOICE_CONFIG = {
   fr: "Celeste-PlayAI",
   french: "Celeste-PlayAI",
@@ -24,58 +21,95 @@ const VOICE_CONFIG = {
 const TTS_MODEL = "playai-tts";
 
 /**
- * Supprime le Markdown et les caractères spéciaux que l'IA écrit
- * mais que la synthèse vocale ne doit pas prononcer.
+ * Supprime le Markdown et les caractères spéciaux avant synthèse vocale.
+ * @param {string} text
+ * @returns {string}
  */
 function cleanTextForTTS(text) {
   if (!text) return "";
   return text
-    .replace(/\*\*/g, "") // Supprime les gras **
-    .replace(/\*/g, "") // Supprime les italiques *
-    .replace(/`/g, "") // Supprime les backticks code
-    .replace(/[-•♦]/g, ",") // Remplace les puces de listes par des virgules pour marquer une pause naturelle
-    .replace(/\s+/g, " ") // Normalise les espaces
+    .replace(/\*\*/g, "")
+    .replace(/\*/g, "")
+    .replace(/`/g, "")
+    .replace(/[-•♦]/g, ",")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
 /**
- * Split long text safely for TTS APIs
- * Avoids truncation and preserves sentence flow
+ * Découpe un texte long en segments de maxLength pour l'API TTS.
+ * FIX Bug 9: la regex [.!?]+ rate les phrases sans ponctuation.
+ * On découpe d'abord par ponctuation, puis par longueur brute si nécessaire.
+ *
+ * @param {string} text
+ * @param {number} maxLength
+ * @returns {string[]}
  */
 function splitText(text, maxLength = 3000) {
   if (!text) return [];
 
   const cleaned = cleanTextForTTS(text);
+  if (cleaned.length <= maxLength) return [cleaned];
 
-  if (cleaned.length <= maxLength) {
-    return [cleaned];
-  }
-
-  const sentences = cleaned.match(/[^.!?]+[.!?]+/g) || [cleaned];
+  // Découpe par phrases (ponctuation) ou à défaut par mots
+  const sentences = cleaned.match(/[^.!?]+[.!?]*/g) || [cleaned];
   const chunks = [];
   let current = "";
 
   for (const sentence of sentences) {
-    if ((current + sentence).length > maxLength) {
-      chunks.push(current.trim());
-      current = "";
+    // Si une phrase seule dépasse maxLength, on la coupe par mots
+    if (sentence.length > maxLength) {
+      if (current.trim()) {
+        chunks.push(current.trim());
+        current = "";
+      }
+      const words = sentence.split(" ");
+      for (const word of words) {
+        if ((current + " " + word).trim().length > maxLength) {
+          if (current.trim()) chunks.push(current.trim());
+          current = word;
+        } else {
+          current = current ? current + " " + word : word;
+        }
+      }
+      continue;
     }
-    current += `${sentence} `;
+
+    if ((current + " " + sentence).trim().length > maxLength) {
+      if (current.trim()) chunks.push(current.trim());
+      current = sentence;
+    } else {
+      current = current ? current + " " + sentence : sentence;
+    }
   }
 
-  if (current.trim()) {
-    chunks.push(current.trim());
-  }
+  if (current.trim()) chunks.push(current.trim());
 
   return chunks;
 }
 
 /**
- * Convert multiple MP3 buffers joined into a single coherent WhatsApp-native OGG Opus
+ * Convertit un Buffer MP3 en OGG Opus compatible WhatsApp.
+ *
+ * FIX Bug 11 + Bug 12: le PassThrough pouvait émettre "end" avant que
+ * FFmpeg ait flushed tous les chunks, et reject/resolve pouvaient être
+ * appelés plusieurs fois en cas d'erreur.
+ * Solution: on utilise un flag `settled` + on écoute "finish" sur
+ * le PassThrough plutôt que "end".
+ *
+ * @param {Buffer} mp3Buffer
+ * @returns {Promise<Buffer>}
  */
 async function mp3ToOggOpus(mp3Buffer) {
   return new Promise((resolve, reject) => {
+    let settled = false;
     const chunks = [];
+
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
 
     const input = new Readable({
       read() {
@@ -84,43 +118,45 @@ async function mp3ToOggOpus(mp3Buffer) {
       },
     });
 
-    const output = new PassThrough();
-
-    output.on("data", (chunk) => {
-      chunks.push(chunk);
-    });
-
-    output.on("end", () => {
-      resolve(Buffer.concat(chunks));
-    });
-
-    ffmpeg(input)
+    const proc = ffmpeg(input)
       .inputFormat("mp3")
-      // Utilisation du filtre d'encodage universellement accepté par l'application mobile WhatsApp
       .audioCodec("libopus")
       .audioBitrate("32k")
       .audioChannels(1)
       .audioFrequency(48000)
       .format("ogg")
-      .on("start", (cmd) => {
-        logger.debug({ cmd }, "[TTS] FFmpeg started");
-      })
+      .on("start", (cmd) => logger.debug({ cmd }, "[TTS] FFmpeg started"))
       .on("error", (err) => {
-        logger.error({ err: err.message }, "[TTS] FFmpeg conversion failed");
-        reject(err);
-      })
-      .on("end", () => {
-        logger.debug("[TTS] FFmpeg conversion completed");
-      })
-      .pipe(output, { end: true });
+        logger.error({ err: err.message }, "[TTS] FFmpeg error");
+        settle(reject, err);
+      });
+
+    const outputStream = proc.pipe();
+
+    outputStream.on("data", (chunk) => chunks.push(chunk));
+
+    // FIX Bug 11: "finish" garantit que le stream interne a bien
+    // terminé d'écrire, contrairement à "end" sur un PassThrough.
+    outputStream.on("finish", () => {
+      settle(resolve, Buffer.concat(chunks));
+    });
+
+    outputStream.on("error", (err) => {
+      logger.error({ err: err.message }, "[TTS] Output stream error");
+      settle(reject, err);
+    });
   });
 }
 
 /**
- * Generate high-quality WhatsApp-ready voice note
+ * Génère une note vocale WhatsApp-ready à partir d'un texte.
  *
- * Pipeline:
- * Text -> Clean Markdown -> Groq PlayAI TTS (MP3 Chunks) -> Merged Buffers -> FFmpeg (OGG Opus)
+ * Pipeline: Texte → Nettoyage → Groq PlayAI TTS (MP3) → FFmpeg → OGG Opus
+ *
+ * FIX Bug 10: Buffer.concat(mp3Chunks) collait les headers MP3 de chaque
+ * chunk, ce qui pouvait créer des artefacts. Pour les chunks multiples,
+ * on convertit chaque chunk séparément en OGG puis on les concatène —
+ * les streams OGG Opus se concatenent proprement contrairement au MP3.
  *
  * @param {string} text
  * @param {string} language
@@ -128,32 +164,24 @@ async function mp3ToOggOpus(mp3Buffer) {
  */
 export async function textToSpeech(text, language = "fr") {
   try {
-    if (!text || !text.trim()) {
+    if (!text?.trim()) {
       logger.warn("[TTS] Empty text received");
       return null;
     }
 
     const normalizedLang = String(language).toLowerCase().trim();
-    const voice = VOICE_CONFIG[normalizedLang] || VOICE_CONFIG.default;
-
-    // Découpe après nettoyage automatique du texte
+    const voice = VOICE_CONFIG[normalizedLang] ?? VOICE_CONFIG.default;
     const chunks = splitText(text);
 
     logger.info(
-      {
-        chunks: chunks.length,
-        language: normalizedLang,
-        voice,
-      },
+      { chunks: chunks.length, language: normalizedLang, voice },
       "[TTS] Starting synthesis",
     );
 
-    const mp3Chunks = [];
+    const oggChunks = [];
 
-    /**
-     * Generate MP3 chunks from Groq TTS
-     */
     for (const chunk of chunks) {
+      // Génération MP3 depuis Groq TTS
       const response = await groq.audio.speech.create({
         model: TTS_MODEL,
         voice,
@@ -164,47 +192,27 @@ export async function textToSpeech(text, language = "fr") {
       const arrayBuffer = await response.arrayBuffer();
       const mp3Buffer = Buffer.from(arrayBuffer);
 
-      if (!mp3Buffer || mp3Buffer.length === 0) {
+      if (!mp3Buffer?.length) {
         throw new Error("Groq returned empty audio buffer");
       }
 
-      mp3Chunks.push(mp3Buffer);
+      // FIX Bug 10: conversion individuelle MP3→OGG par chunk
+      // pour éviter les artefacts de header MP3 concatenés
+      const oggChunk = await mp3ToOggOpus(mp3Buffer);
+      oggChunks.push(oggChunk);
     }
 
-    /**
-     * Merge all MP3 chunks safely
-     */
-    const mergedMp3 = Buffer.concat(mp3Chunks);
+    // Les streams OGG Opus se concatenent proprement
+    const finalBuffer = Buffer.concat(oggChunks);
 
-    logger.info(
-      {
-        size: mergedMp3.length,
-      },
-      "[TTS] MP3 synthesis completed",
-    );
+    logger.info({ size: finalBuffer.length }, "[TTS] OGG Opus ready");
 
-    /**
-     * Convert to WhatsApp-native OGG Opus
-     */
-    const oggOpusBuffer = await mp3ToOggOpus(mergedMp3);
-
-    logger.info(
-      {
-        size: oggOpusBuffer.length,
-      },
-      "[TTS] OGG Opus conversion completed",
-    );
-
-    return oggOpusBuffer;
+    return finalBuffer;
   } catch (err) {
     logger.error(
-      {
-        err: err.message,
-        stack: err.stack,
-      },
+      { err: err.message, stack: err.stack },
       "[TTS] Pipeline failed",
     );
-
     return null;
   }
 }

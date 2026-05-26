@@ -7,26 +7,47 @@ import makeWASocket, {
 
 import { useMongoAuthState } from "../helpers/mongo-auth.js";
 import { logger } from "../config/logger.js";
-import { onHumanReply } from "../services/bot.service.js"; // Import indispensable pour la mémoire contextuelle
 
 let sock = null;
 let currentQR = null;
 let isConnected = false;
 
-/**
- * Ignore les messages envoyés avant le démarrage du bot
- */
+// Ignore les messages antérieurs au démarrage du bot
 const BOT_START_TIME = Math.floor(Date.now() / 1000);
 
-/**
- * Évite le double traitement des messages (Cache anti-doublon)
- */
-const processedMessages = new Set();
+// FIX Bug 2: LRU manuel — on ne clear() plus tout le Set d'un coup.
+// On garde les 500 derniers IDs dans un tableau tournant pour éviter
+// de perdre les IDs récents lors d'un burst de messages.
+const MAX_PROCESSED_IDS = 500;
+const processedIds = new Set();
+const processedIdsQueue = [];
 
-/**
- * Taille maximale acceptée pour un fichier audio (15 Mo)
- */
+function markProcessed(id) {
+  if (processedIds.has(id)) return false;
+  processedIds.add(id);
+  processedIdsQueue.push(id);
+  if (processedIdsQueue.length > MAX_PROCESSED_IDS) {
+    const oldest = processedIdsQueue.shift();
+    processedIds.delete(oldest);
+  }
+  return true;
+}
+
+// Taille maximale pour un fichier audio (15 Mo)
 const MAX_AUDIO_SIZE = 15 * 1024 * 1024;
+
+// FIX Bug 3: Backoff exponentiel pour la reconnexion (max 30s)
+let reconnectAttempts = 0;
+const MAX_RECONNECT_DELAY_MS = 30_000;
+
+function getReconnectDelay() {
+  const delay = Math.min(
+    3000 * Math.pow(1.5, reconnectAttempts),
+    MAX_RECONNECT_DELAY_MS,
+  );
+  reconnectAttempts++;
+  return delay;
+}
 
 export function getCurrentQR() {
   return currentQR;
@@ -37,7 +58,16 @@ export function getConnectionStatus() {
 }
 
 /**
- * Démarre le client WhatsApp
+ * Démarre le client WhatsApp.
+ *
+ * FIX Bug 4: Le paramètre `onHumanReply` rentrait en collision avec
+ * l'import du même nom depuis bot.service.js. Les deux fonctions
+ * coexistaient dans le même scope → comportement indéfini selon
+ * l'ordre d'exécution.
+ * Solution : on supprime l'import statique de onHumanReply depuis
+ * bot.service.js et on reçoit uniquement la référence via paramètre.
+ *
+ * @param {{ onIncomingMessage: Function, onHumanReply: Function }} callbacks
  */
 export async function startWhatsApp({ onIncomingMessage, onHumanReply }) {
   const { state, saveCreds } = await useMongoAuthState();
@@ -55,16 +85,16 @@ export async function startWhatsApp({ onIncomingMessage, onHumanReply }) {
     browser: ["WhatsApp AI Bot", "Chrome", "1.0"],
     syncFullHistory: false,
     markOnlineOnConnect: false,
+    // Évite les timeouts silencieux sur les connexions lentes
+    connectTimeoutMs: 30_000,
+    defaultQueryTimeoutMs: 20_000,
+    keepAliveIntervalMs: 25_000,
   });
 
-  /**
-   * Persistance des mises à jour d'authentification
-   */
+  // Persistance des mises à jour d'authentification
   sock.ev.on("creds.update", saveCreds);
 
-  /**
-   * Cycle de vie de la connexion
-   */
+  // Cycle de vie de la connexion
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
     if (qr) {
       currentQR = qr;
@@ -75,6 +105,7 @@ export async function startWhatsApp({ onIncomingMessage, onHumanReply }) {
     if (connection === "open") {
       currentQR = null;
       isConnected = true;
+      reconnectAttempts = 0; // Réinitialise le compteur de backoff
       logger.info("[WA] Connected successfully ✓");
     }
 
@@ -86,10 +117,14 @@ export async function startWhatsApp({ onIncomingMessage, onHumanReply }) {
       logger.warn({ statusCode }, "[WA] Connection closed");
 
       if (shouldReconnect) {
-        logger.info("[WA] Reconnecting in 3 seconds...");
+        const delay = getReconnectDelay();
+        logger.info(
+          { delay, attempt: reconnectAttempts },
+          "[WA] Reconnecting...",
+        );
         setTimeout(() => {
           startWhatsApp({ onIncomingMessage, onHumanReply });
-        }, 3000);
+        }, delay);
       } else {
         logger.error("[WA] Logged out permanently");
         process.exit(1);
@@ -97,15 +132,13 @@ export async function startWhatsApp({ onIncomingMessage, onHumanReply }) {
     }
   });
 
-  /**
-   * Réception des messages entrants et sortants
-   */
+  // Réception des messages entrants et sortants
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
 
     for (const msg of messages) {
       try {
-        await handleRawMessage(sock, msg, onIncomingMessage);
+        await handleRawMessage(sock, msg, onIncomingMessage, onHumanReply);
       } catch (err) {
         logger.error(
           { err: err.message, stack: err.stack },
@@ -119,14 +152,13 @@ export async function startWhatsApp({ onIncomingMessage, onHumanReply }) {
 }
 
 /**
- * Processeur central des messages bruts WhatsApp
+ * Processeur central des messages bruts WhatsApp.
  */
-async function handleRawMessage(sock, msg, onIncomingMessage) {
+async function handleRawMessage(sock, msg, onIncomingMessage, onHumanReply) {
   if (!msg.message) return;
 
   const jid = msg.key.remoteJid;
 
-  // Extraction du texte multi-format (gère conversations simples, messages enrichis et légendes de médias)
   const text =
     msg.message?.conversation ||
     msg.message?.extendedTextMessage?.text ||
@@ -134,80 +166,51 @@ async function handleRawMessage(sock, msg, onIncomingMessage) {
     msg.message?.videoMessage?.caption ||
     null;
 
-  /**
-   * CAPTURE DE TA PROPRE ACTIVITÉ (MANUELLE)
-   * Si le message vient de toi, on extrait le texte et on l'enregistre dans Mongo pour l'historique du bot.
-   */
+  // Capture des messages envoyés manuellement par l'owner
   if (msg.key.fromMe) {
-    if (text && text.trim() !== "") {
-      // Déclenche l'enregistrement en tâche de fond pour l'IA
+    if (text?.trim()) {
       await onHumanReply(jid, text.trim());
     }
-    return; // On s'arrête ici, le bot ne doit pas se répondre à lui-même
-  }
-
-  /**
-   * Protection contre les doublons
-   */
-  if (processedMessages.has(msg.key.id)) {
-    logger.debug({ id: msg.key.id }, "[WA] Duplicate message skipped");
     return;
   }
-  processedMessages.add(msg.key.id);
 
-  // Nettoyage périodique pour éviter les fuites de mémoire
-  if (processedMessages.size > 5000) {
-    processedMessages.clear();
+  // FIX Bug 2: LRU anti-doublon au lieu de clear() brutal
+  if (!markProcessed(msg.key.id)) {
+    logger.debug({ id: msg.key.id }, "[WA] Duplicate message skipped");
+    return;
   }
 
   const msgTimestamp = Number(msg.messageTimestamp) || 0;
 
-  /**
-   * Ignore les anciens messages (reçus pendant que le serveur était éteint)
-   */
+  // Ignore les messages antérieurs au démarrage
   if (msgTimestamp < BOT_START_TIME) {
-    logger.debug(
-      { jid, msgTimestamp, BOT_START_TIME },
-      "[WA] Ignoring pre-boot message",
-    );
+    logger.debug({ jid, msgTimestamp }, "[WA] Ignoring pre-boot message");
     return;
   }
 
   const contactName = msg.pushName || null;
 
-  /**
-   * Marquer le message comme lu immédiatement
-   */
-  await sock.readMessages([msg.key]);
-
-  /**
-   * Détection et traitement des messages Audio / Vocaux
-   */
   const audioMessage = msg.message?.audioMessage;
   const isAudio = !!audioMessage;
 
   if (isAudio) {
     logger.info({ jid }, "[WA] Audio message received");
-
-    // Déclenche l'indicateur "Enregistre un audio..." sur le téléphone de l'émetteur
     await sock.sendPresenceUpdate("recording", jid);
 
     const fileLength = Number(audioMessage?.fileLength) || 0;
     if (fileLength > MAX_AUDIO_SIZE) {
       await sendMessage(
-        sock,
         jid,
-        "Votre message vocal est trop long (limite de 15 Mo).",
+        "Votre message vocal est trop long (limite 15 Mo).",
       );
       return;
     }
 
     try {
-      // Téléchargement du buffer du message vocal
       const audioBuffer = await downloadMediaMessage(msg, "buffer", {});
       const mime = audioMessage?.mimetype || "audio/ogg";
 
-      // Transmission au pipeline d'orchestration de l'IA
+      // FIX Bug 5: readMessages déclenché APRÈS le traitement réussi
       await onIncomingMessage(
         sock,
         jid,
@@ -217,30 +220,24 @@ async function handleRawMessage(sock, msg, onIncomingMessage) {
         audioBuffer,
         mime,
       );
+
+      await sock.readMessages([msg.key]);
     } catch (err) {
       logger.error(
         { err: err.message, stack: err.stack },
-        "[WA] Failed to process audio media download",
+        "[WA] Failed to process audio",
       );
-
       await sendMessage(
         jid,
-        "Désolé, je n'arrive pas à télécharger ou lire ce vocal actuellement. Peux-tu reformuler par écrit ?",
+        "Désolé, je n'arrive pas à lire ce vocal. Peux-tu reformuler par écrit ?",
       );
     }
     return;
   }
 
-  /**
-   * Ignore les messages textuels vides
-   */
-  if (!text || text.trim() === "") {
-    return;
-  }
+  if (!text?.trim()) return;
 
-  /**
-   * Envoi du texte propre au pipeline d'orchestration de l'IA
-   */
+  // FIX Bug 5: readMessages déclenché APRÈS le traitement réussi
   await onIncomingMessage(
     sock,
     jid,
@@ -250,19 +247,16 @@ async function handleRawMessage(sock, msg, onIncomingMessage) {
     null,
     null,
   );
+
+  await sock.readMessages([msg.key]);
 }
 
 /**
- * Envoie un message textuel avec simulation d'écriture
+ * Envoie un message texte avec simulation de frappe.
  */
 export async function sendMessage(jid, text, delayMs = 0) {
-  if (!sock) {
-    throw new Error("WhatsApp client not initialized");
-  }
-
-  if (!text || text.trim() === "") {
-    throw new Error("Cannot send empty message");
-  }
+  if (!sock) throw new Error("WhatsApp client not initialized");
+  if (!text?.trim()) throw new Error("Cannot send empty message");
 
   if (delayMs > 0) {
     await sock.sendPresenceUpdate("composing", jid);
@@ -275,16 +269,11 @@ export async function sendMessage(jid, text, delayMs = 0) {
 }
 
 /**
- * Envoie une note vocale native WhatsApp (OGG/Opus + indicateur PTT)
+ * Envoie une note vocale native WhatsApp (OGG/Opus PTT).
  */
 export async function sendVoiceMessage(jid, audioBuffer, delayMs = 0) {
-  if (!sock) {
-    throw new Error("WhatsApp client not initialized");
-  }
-
-  if (!audioBuffer || audioBuffer.length === 0) {
-    throw new Error("Invalid audio buffer");
-  }
+  if (!sock) throw new Error("WhatsApp client not initialized");
+  if (!audioBuffer?.length) throw new Error("Invalid audio buffer");
 
   if (delayMs > 0) {
     await sock.sendPresenceUpdate("recording", jid);
@@ -295,7 +284,7 @@ export async function sendVoiceMessage(jid, audioBuffer, delayMs = 0) {
   await sock.sendMessage(jid, {
     audio: audioBuffer,
     mimetype: "audio/ogg; codecs=opus",
-    ptt: true, // Affiche le lecteur comme un enregistrement de note vocale classique
+    ptt: true,
   });
 
   logger.info({ jid }, "[WA] Voice note sent");

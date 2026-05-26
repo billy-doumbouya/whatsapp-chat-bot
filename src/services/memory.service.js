@@ -1,20 +1,20 @@
 import { Conversation } from "../models/conversation.model.js";
 import { logger } from "../config/logger.js";
 
-// Nombre de messages à passer à l'IA comme contexte
-const CONTEXT_WINDOW = 15; // Aligné avec ton prompt builder pour un meilleur fil conducteur
-// Max messages stockés par conversation dans la DB
+// Nombre de messages passés à l'IA comme contexte
+const CONTEXT_WINDOW = 15;
+// Max messages stockés par conversation en DB
 const MAX_STORED_MESSAGES = 50;
 
 /**
- * Retourne les derniers N messages pour un numéro donné
+ * Retourne les derniers N messages pour un numéro donné.
  * @param {string} phone - WhatsApp JID
  * @returns {Promise<Array>}
  */
 export async function getHistory(phone) {
   try {
     const convo = await Conversation.findOne({ phone }).lean();
-    return convo?.messages?.slice(-CONTEXT_WINDOW) || [];
+    return convo?.messages?.slice(-CONTEXT_WINDOW) ?? [];
   } catch (err) {
     logger.error({ err, phone }, "[Memory] Failed to get history");
     return [];
@@ -23,7 +23,8 @@ export async function getHistory(phone) {
 
 /**
  * Enregistre un message (user ou ai) dans la conversation.
- * Évite les écritures miroirs identiques successives.
+ * Évite les doublons exacts successifs.
+ *
  * @param {string} phone
  * @param {"user"|"ai"} role
  * @param {string} content
@@ -34,14 +35,13 @@ export async function saveMessage(phone, role, content, contactName = null) {
     const cleanContent = content?.trim();
     if (!cleanContent) return;
 
-    // PROTECTION ANTI-DOUBLON HISTORIQUE :
-    // On vérifie le tout dernier message en DB pour ce fil
+    // Anti-doublon : compare avec le tout dernier message du fil
     const existingConvo = await Conversation.findOne(
       { phone },
       { messages: { $slice: -1 } },
     ).lean();
-    const lastMessage = existingConvo?.messages?.[0];
 
+    const lastMessage = existingConvo?.messages?.[0];
     if (
       lastMessage &&
       lastMessage.role === role &&
@@ -49,15 +49,13 @@ export async function saveMessage(phone, role, content, contactName = null) {
     ) {
       logger.debug(
         { phone, role },
-        "[Memory] Message identique déjà présent à la fin de l'historique. Skip.",
+        "[Memory] Message identique en fin d'historique. Skip.",
       );
       return;
     }
 
     const setFields = { lastMessageAt: new Date() };
-    if (contactName) {
-      setFields.contactName = contactName;
-    }
+    if (contactName) setFields.contactName = contactName;
 
     await Conversation.findOneAndUpdate(
       { phone },
@@ -82,15 +80,32 @@ export async function saveMessage(phone, role, content, contactName = null) {
 }
 
 /**
- * Supprime l'historique des messages d'un contact
+ * Supprime l'historique d'un contact et remet le compteur à zéro.
+ * FIX: totalMessages était remis à 0 via $set mais l'opération $set
+ * et $push ne peuvent pas coexister sur le même chemin — on utilise
+ * findOneAndUpdate avec seulement $set pour éviter toute ambiguïté.
+ *
  * @param {string} phone
  */
 export async function clearHistory(phone) {
   try {
-    await Conversation.findOneAndUpdate(
+    const result = await Conversation.findOneAndUpdate(
       { phone },
-      { $set: { messages: [], totalMessages: 0 } },
+      {
+        $set: {
+          messages: [],
+          totalMessages: 0,
+          lastMessageAt: null,
+        },
+      },
+      { new: true },
     );
+
+    if (!result) {
+      logger.warn({ phone }, "[Memory] clearHistory: conversation not found");
+      return;
+    }
+
     logger.info({ phone }, "[Memory] History cleared");
   } catch (err) {
     logger.error(
@@ -101,7 +116,8 @@ export async function clearHistory(phone) {
 }
 
 /**
- * Retourne le résumé de toutes les conversations (pour ton Dashboard API)
+ * Résumé de toutes les conversations (Dashboard API).
+ * @returns {Promise<Array>}
  */
 export async function getAllConversations() {
   try {

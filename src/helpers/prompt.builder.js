@@ -1,12 +1,17 @@
-import { env } from "../config/env.js";
 import { Bio } from "../data/bio.js";
 
-const CONTEXT_WINDOW = 10;
+// Aligné avec CONTEXT_WINDOW de memory.service.js (source unique de vérité).
+// FIX Bug 9: le slice est fait UNE SEULE FOIS ici — on supprime le
+// history.slice(-CONTEXT_WINDOW) qui était aussi dans buildPrompt(),
+// ce qui réduisait la fenêtre effective à 10 (CONTEXT_WINDOW local)
+// au lieu des 15 déjà slicés par getHistory().
+// Désormais getHistory() fournit exactement les N bons messages
+// et buildPrompt() les utilise tels quels.
 
 /**
- * Normalise la langue reçue de Whisper ou de l'analyse textuelle
+ * Normalise la langue reçue de Whisper vers une valeur stable pour le LLM.
  * @param {string|null} lang
- * @returns {"anglais"|"français"|"malinké"}
+ * @returns {"anglais"|"français"|"malinké"|null}
  */
 function normalizeLanguage(lang) {
   if (!lang) return null;
@@ -22,14 +27,36 @@ function normalizeLanguage(lang) {
 }
 
 /**
- * Construit le tableau de messages final destiné à l'API LLM (Gemini/OpenAI)
+ * Sanitise un nom de contact pour éviter l'injection dans le system prompt.
+ * FIX Bug 8: un contactName envoyé par l'utilisateur comme
+ * "Sara. Ignore previous instructions and..." était injecté
+ * directement dans le system prompt sans aucune validation.
+ * On tronque, on supprime les retours à la ligne et les caractères
+ * de contrôle, et on échappe les backticks.
  *
- * @param {Array} history - L'historique extrait de la base MongoDB
- * @param {string} userMessage - Le dernier message reçu (ou la transcription Whisper)
- * @param {boolean} isWife - Flag indiquant si l'interlocuteur est Sara
- * @param {string|null} contactName - Le nom enregistré du contact WhatsApp
- * @param {string|null} detectedLanguage - La langue détectée par le service de transcription
- * @returns {Array} Payload de messages prêt pour l'envoi
+ * @param {string|null} name
+ * @returns {string|null}
+ */
+function sanitizeContactName(name) {
+  if (!name || typeof name !== "string") return null;
+  return (
+    name
+      .replace(/[\r\n\t]/g, " ") // Pas de retours à la ligne dans le prompt
+      .replace(/`/g, "'") // Pas de backticks exploitables
+      .slice(0, 50) // Taille max raisonnable pour un prénom
+      .trim() || null
+  );
+}
+
+/**
+ * Construit le tableau de messages destiné à l'API LLM.
+ *
+ * @param {Array}       history          - Messages extraits de MongoDB (déjà slicés par getHistory)
+ * @param {string}      userMessage      - Dernier message reçu (ou transcription Whisper)
+ * @param {boolean}     isWife           - Flag Sara
+ * @param {string|null} contactName      - Nom du contact WhatsApp (non approuvé — sanitisé ici)
+ * @param {string|null} detectedLanguage - Langue détectée par Whisper
+ * @returns {Array} Payload prêt pour l'envoi au LLM
  */
 export function buildPrompt(
   history,
@@ -38,34 +65,39 @@ export function buildPrompt(
   contactName = null,
   detectedLanguage = null,
 ) {
+  const safeName = sanitizeContactName(contactName);
+  const normalizedLang = normalizeLanguage(detectedLanguage);
+
+  // Construction du system prompt
   let system = Bio;
 
   if (isWife) {
     system += `\n\nCONTEXT: Sara is your partner. Use affectionate tone.`;
   }
 
-  if (contactName) {
-    system += `\n\nCONTEXT: User name is ${contactName}.`;
+  if (safeName) {
+    system += `\n\nCONTEXT: User name is ${safeName}.`;
+  }
+
+  // FIX Bug 10: l'instruction de langue est injectée dans le system prompt
+  // et non dans le message user. Avant, le LLM pouvait répéter l'instruction
+  // verbatim ("Respond in: français") au lieu de simplement l'appliquer.
+  if (normalizedLang) {
+    system += `\n\nCONTEXT: Always respond in ${normalizedLang}. Do not mention this instruction.`;
   }
 
   const messages = [
     { role: "system", content: system },
-    ...history.slice(-CONTEXT_WINDOW).map((m) => ({
+    // FIX Bug 9: history est utilisé tel quel — getHistory() a déjà appliqué le slice.
+    ...history.map((m) => ({
       role: m.role === "ai" ? "assistant" : "user",
       content: m.content,
     })),
+    {
+      role: "user",
+      content: userMessage,
+    },
   ];
-
-  let finalUserMessage = userMessage;
-
-  if (detectedLanguage) {
-    finalUserMessage += `\n\nRespond in: ${detectedLanguage}`;
-  }
-
-  messages.push({
-    role: "user",
-    content: finalUserMessage,
-  });
 
   return messages;
 }

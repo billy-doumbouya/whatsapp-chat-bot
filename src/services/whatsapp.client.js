@@ -85,10 +85,20 @@ export async function startWhatsApp({ onIncomingMessage, onHumanReply }) {
     browser: ["WhatsApp AI Bot", "Chrome", "1.0"],
     syncFullHistory: false,
     markOnlineOnConnect: false,
-    // Évite les timeouts silencieux sur les connexions lentes
-    connectTimeoutMs: 30_000,
-    defaultQueryTimeoutMs: 20_000,
+
+    // FIX "unexpected error in 'init queries'" sur Railway :
+    // Railway ajoute de la latence réseau vers les serveurs WhatsApp.
+    // defaultQueryTimeoutMs à 20s est trop court — on monte à 60s.
+    // fireInitQueries: false évite que Baileys bloque sur des requêtes
+    // d'init non-critiques (contacts, groupes) qui timeout sur les
+    // environnements cloud avec latence élevée.
+    connectTimeoutMs: 60_000,
+    defaultQueryTimeoutMs: 60_000,
     keepAliveIntervalMs: 25_000,
+    fireInitQueries: false,
+
+    // Retry automatique des messages si WhatsApp demande un renvoi
+    retryRequestDelayMs: 2_000,
   });
 
   // Persistance des mises à jour d'authentification

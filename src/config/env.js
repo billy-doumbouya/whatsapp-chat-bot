@@ -23,7 +23,7 @@ export const env = {
 
   gemini: {
     apiKey: process.env.OPENROUTER_API_KEY,
-    model: process.env.AI_MODEL || "google/gemini-2.0-flash-exp:free",
+    model: process.env.AI_MODEL || "google/gemini-1.5-flash",
   },
 
   bot: {

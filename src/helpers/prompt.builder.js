@@ -38,50 +38,34 @@ export function buildPrompt(
   contactName = null,
   detectedLanguage = null,
 ) {
-  // 1. Initialisation du prompt système avec ta Bio officielle
-  let dynamicSystemInstructions = Bio;
+  let system = Bio;
 
-  // 2. Ajout des couches de contexte prioritaires au prompt système
   if (isWife) {
-    dynamicSystemInstructions += `\n\n---
-# CRITICAL WIFE CONTEXT
-Ce message vient de ta femme Sara (${env.bot.wifeName}). Applique immédiatement les règles affectueuses du persona. Tu dois l'appeler "chérie", "mon amour" ou "Sara". Ne sois jamais distant ou formel avec elle.`;
-  } else if (contactName) {
-    dynamicSystemInstructions += `\n\n---
-# CURRENT CONTACT CONTEXT
-La personne qui t'écrit actuellement s'appelle : ${contactName}. Utilise son prénom si la situation s'y prête conformément aux règles de style du persona.`;
+    system += `\n\nCONTEXT: Sara is your partner. Use affectionate tone.`;
   }
 
-  const finalMessages = [
-    {
-      role: "system",
-      content: dynamicSystemInstructions,
-    },
+  if (contactName) {
+    system += `\n\nCONTEXT: User name is ${contactName}.`;
+  }
+
+  const messages = [
+    { role: "system", content: system },
+    ...history.slice(-CONTEXT_WINDOW).map((m) => ({
+      role: m.role === "ai" ? "assistant" : "user",
+      content: m.content,
+    })),
   ];
 
-  // 3. Traitement et injection de l'historique récent (Respect de la CONTEXT_WINDOW)
-  const historyMessages = history.slice(-CONTEXT_WINDOW).map((msg) => ({
-    role: msg.role === "ai" ? "assistant" : "user",
-    content: msg.content,
-  }));
+  let finalUserMessage = userMessage;
 
-  finalMessages.push(...historyMessages);
-
-  // 4. Détermination de la consigne de langue stricte
-  const targetLang = normalizeLanguage(detectedLanguage);
-  let langInstruction = "";
-
-  if (targetLang) {
-    langInstruction = `\n\n[Instruction invisible pour l'IA : Réponds obligatoirement et entièrement en langue ${targetLang}]`;
-  } else {
-    langInstruction = `\n\n[Instruction invisible pour l'IA : Applique la règle "DETECTION AUTOMATIQUE DE LA LANGUE" définie dans ton style de communication]`;
+  if (detectedLanguage) {
+    finalUserMessage += `\n\nRespond in: ${detectedLanguage}`;
   }
 
-  // 5. Ajout du message utilisateur courant avec sa directive linguistique sécurisée
-  finalMessages.push({
+  messages.push({
     role: "user",
-    content: userMessage + langInstruction,
+    content: finalUserMessage,
   });
 
-  return finalMessages;
+  return messages;
 }
